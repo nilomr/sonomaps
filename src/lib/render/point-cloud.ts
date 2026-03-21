@@ -1,9 +1,8 @@
 /**
  * Point cloud + trail renderer.
  *
- * - Tiny crisp points with NormalBlending
- * - Visible continuous trail line
- * - 4000 point capacity for high-frequency sampling (~250/sec)
+ * Light cream background, dark monochrome data points.
+ * Clean, precise, data-visualization aesthetic.
  */
 
 import * as THREE from 'three';
@@ -48,7 +47,6 @@ export class PointCloudRenderer {
 	private count = 0;
 	private readonly outputDim: number;
 
-	// Age step per render frame. At 60fps render, 1/600 = ~10 sec fade.
 	private readonly ageStep: number;
 
 	constructor(canvas: HTMLCanvasElement, opts?: PointCloudOptions) {
@@ -68,12 +66,13 @@ export class PointCloudRenderer {
 	private initRenderer(canvas: HTMLCanvasElement): void {
 		this.renderer = new THREE.WebGLRenderer({
 			canvas,
-			antialias: false,
+			antialias: true,
 			alpha: false,
 			powerPreference: 'high-performance'
 		});
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-		this.renderer.setClearColor(0x08080f, 1);
+		// Warm cream background
+		this.renderer.setClearColor(0xf2ede4, 1);
 	}
 
 	private initScene(): void {
@@ -89,12 +88,11 @@ export class PointCloudRenderer {
 		this.controls.enablePan = true;
 		this.controls.minDistance = 3;
 		this.controls.maxDistance = 60;
-		this.controls.autoRotate = false;
 
-		// Subtle axis lines
-		const axisLen = 1.5;
+		// Very subtle grid/axis lines — light gray on cream
+		const axisLen = 2.0;
 		const axisMat = new THREE.LineBasicMaterial({
-			color: 0x14142a, transparent: true, opacity: 0.3
+			color: 0xd0ccc4, transparent: true, opacity: 0.5
 		});
 		for (const pts of [
 			[new THREE.Vector3(-axisLen, 0, 0), new THREE.Vector3(axisLen, 0, 0)],
@@ -235,7 +233,6 @@ export class PointCloudRenderer {
 			}
 		}
 
-		// Build trail index buffer in temporal order
 		if (this.count > 1) {
 			const n = this.count;
 			const start = (this.head - n + this.maxPoints) % this.maxPoints;

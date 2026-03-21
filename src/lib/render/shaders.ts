@@ -1,8 +1,8 @@
 /**
  * Shaders for the audio point cloud.
  *
- * Aesthetic: tiny crisp dots with bright cores, vivid blue→cyan→white palette.
- * Trail line shows trajectory with same coloring.
+ * Aesthetic: dark, precise points on light cream background.
+ * Monochrome with subtle tonal variation from spectral centroid.
  */
 
 export const pointVertexShader = /* glsl */ `
@@ -25,7 +25,6 @@ export const pointVertexShader = /* glsl */ `
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
 
     float alive = max(0.0, 1.0 - vAge);
-    // Energy scales size subtly: 0.5x–1.2x
     float energyScale = 0.5 + vEnergy * 0.7;
 
     gl_PointSize = uPointSize * uPixelRatio * energyScale * alive
@@ -41,15 +40,15 @@ export const pointFragmentShader = /* glsl */ `
   varying float vCentroid;
 
   vec3 palette(float t) {
-    // Deep indigo → electric blue → cyan → ice white
-    vec3 c0 = vec3(0.10, 0.08, 0.32);
-    vec3 c1 = vec3(0.15, 0.35, 0.88);
-    vec3 c2 = vec3(0.25, 0.78, 0.92);
-    vec3 c3 = vec3(0.82, 0.95, 1.00);
+    // Dark monochrome with subtle cool/warm shift
+    // Low centroid (dark sounds): warm charcoal
+    // High centroid (bright sounds): cool dark blue
+    vec3 warm = vec3(0.12, 0.11, 0.10);  // warm charcoal
+    vec3 mid  = vec3(0.08, 0.10, 0.14);  // neutral dark
+    vec3 cool = vec3(0.06, 0.10, 0.18);  // cool dark blue
 
-    vec3 c = mix(c0, c1, smoothstep(0.0, 0.30, t));
-    c = mix(c, c2, smoothstep(0.20, 0.60, t));
-    return mix(c, c3, smoothstep(0.50, 1.0, t));
+    vec3 c = mix(warm, mid, smoothstep(0.0, 0.45, t));
+    return mix(c, cool, smoothstep(0.35, 1.0, t));
   }
 
   void main() {
@@ -59,16 +58,11 @@ export const pointFragmentShader = /* glsl */ `
 
     vec3 color = palette(vCentroid);
 
-    // Bright core at center
-    float core = 1.0 - smoothstep(0.0, 0.12, sqrt(r2));
-    color += core * vec3(0.25, 0.30, 0.35);
-
-    // Energy boosts brightness
-    color *= 0.55 + vEnergy * 0.45;
+    // Energy darkens the point (more energy = more opaque/dark)
+    color *= 1.1 - vEnergy * 0.3;
 
     float alive = max(0.0, 1.0 - vAge);
-    // Quadratic fade — crisp disappearance
-    float alpha = alive * alive;
+    float alpha = alive * alive * 0.85;
 
     gl_FragColor = vec4(color, alpha);
   }
@@ -99,22 +93,17 @@ export const trailFragmentShader = /* glsl */ `
   varying float vEnergy;
 
   vec3 palette(float t) {
-    vec3 c0 = vec3(0.10, 0.08, 0.32);
-    vec3 c1 = vec3(0.15, 0.35, 0.88);
-    vec3 c2 = vec3(0.25, 0.78, 0.92);
-    vec3 c3 = vec3(0.82, 0.95, 1.00);
-    vec3 c = mix(c0, c1, smoothstep(0.0, 0.30, t));
-    c = mix(c, c2, smoothstep(0.20, 0.60, t));
-    return mix(c, c3, smoothstep(0.50, 1.0, t));
+    vec3 warm = vec3(0.12, 0.11, 0.10);
+    vec3 mid  = vec3(0.08, 0.10, 0.14);
+    vec3 cool = vec3(0.06, 0.10, 0.18);
+    vec3 c = mix(warm, mid, smoothstep(0.0, 0.45, t));
+    return mix(c, cool, smoothstep(0.35, 1.0, t));
   }
 
   void main() {
     vec3 color = palette(vCentroid);
-    color *= 0.6 + vEnergy * 0.4;
-
     float alive = max(0.0, 1.0 - vAge);
-    // Trail is more visible than before, smooth cubic fade
-    float alpha = alive * alive * alive * 0.45;
+    float alpha = alive * alive * alive * 0.25;
 
     gl_FragColor = vec4(color, alpha);
   }
