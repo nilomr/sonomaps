@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { AudioSource } from '$lib/audio/audio-source.js';
 	import { MelFeatureExtractor } from '$lib/dsp/mel.js';
-	import { DirectFeatureEmbedding } from '$lib/embedding/pca.js';
+	import { DirectFeatureEmbedding, FEATURES, getFeature } from '$lib/embedding/pca.js';
 	import { EmbeddingSmoother } from '$lib/embedding/smoother.js';
 	import { PointCloudRenderer } from '$lib/render/point-cloud.js';
 	import { SpectrogramRenderer } from '$lib/render/spectrogram.js';
@@ -37,6 +37,21 @@
 	// ── Fixed parameters ─────────────────────────────────
 	const smoothing = 0.35;
 	const outputDim = 3;
+
+	// ── Axis mapping (user-configurable) ─────────────────
+	let axisX = $state('centroid');
+	let axisY = $state('bandwidth');
+	let axisZ = $state('zcr');
+
+	function onAxesChange() {
+		if (embedding) {
+			embedding.setAxes([axisX, axisY, axisZ]);
+		}
+		if (smoother) {
+			smoother.reset();
+		}
+		pointCloud?.clear();
+	}
 
 	// ── Feature display state (updated ~10Hz) ─────────────
 	let featCentroid = $state('—');
@@ -294,7 +309,7 @@
 				numMfccs: 13
 			});
 
-			embedding = new DirectFeatureEmbedding(outputDim);
+			embedding = new DirectFeatureEmbedding([axisX, axisY, axisZ]);
 			smoother = new EmbeddingSmoother(outputDim, smoothing);
 
 			energyEma = 0; energyVar = 0.01;
@@ -450,6 +465,34 @@
 						class="file-input" />
 				</label>
 			{/if}
+
+			<div class="ctl-group">
+				<span class="ctl-label">AXES</span>
+				<div class="axis-row">
+					<span class="axis-tag">X</span>
+					<select class="axis-select" bind:value={axisX} onchange={onAxesChange}>
+						{#each FEATURES as f}
+							<option value={f.id}>{f.label}</option>
+						{/each}
+					</select>
+				</div>
+				<div class="axis-row">
+					<span class="axis-tag">Y</span>
+					<select class="axis-select" bind:value={axisY} onchange={onAxesChange}>
+						{#each FEATURES as f}
+							<option value={f.id}>{f.label}</option>
+						{/each}
+					</select>
+				</div>
+				<div class="axis-row">
+					<span class="axis-tag">Z</span>
+					<select class="axis-select" bind:value={axisZ} onchange={onAxesChange}>
+						{#each FEATURES as f}
+							<option value={f.id}>{f.label}</option>
+						{/each}
+					</select>
+				</div>
+			</div>
 		</div>
 
 		<div class="sidebar-footer">
@@ -468,11 +511,11 @@
 			<div class="corner br"></div>
 
 			<div class="axes-label">
-				<span class="axis-key">X</span> BRIGHTNESS
+				<span class="axis-key">X</span> {getFeature(axisX).axisLabel}
 				<span class="axes-sep">/</span>
-				<span class="axis-key">Y</span> ENERGY
+				<span class="axis-key">Y</span> {getFeature(axisY).axisLabel}
 				<span class="axes-sep">/</span>
-				<span class="axis-key">Z</span> TONALITY
+				<span class="axis-key">Z</span> {getFeature(axisZ).axisLabel}
 			</div>
 		</section>
 
@@ -781,6 +824,46 @@
 		height: 0;
 		opacity: 0;
 		pointer-events: none;
+	}
+
+	/* ── Axis selectors ──────────────────────────── */
+	.axis-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.axis-row + .axis-row {
+		margin-top: 4px;
+	}
+
+	.axis-tag {
+		font-size: 10px;
+		font-weight: 600;
+		letter-spacing: 1px;
+		color: rgba(42, 42, 50, 0.55);
+		width: 14px;
+		flex-shrink: 0;
+	}
+
+	.axis-select {
+		flex: 1;
+		padding: 5px 8px;
+		border: 1px solid rgba(42, 42, 50, 0.12);
+		border-radius: 3px;
+		background: transparent;
+		color: rgba(42, 42, 50, 0.7);
+		font-family: inherit;
+		font-size: 10px;
+		font-weight: 400;
+		letter-spacing: 0.5px;
+		cursor: pointer;
+		outline: none;
+	}
+	.axis-select:hover {
+		border-color: rgba(42, 42, 50, 0.25);
+	}
+	.axis-select:focus {
+		border-color: rgba(42, 42, 50, 0.3);
 	}
 
 	/* ── Sidebar footer ───────────────────────────── */

@@ -25,7 +25,8 @@ export const pointVertexShader = /* glsl */ `
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
 
     float alive = max(0.0, 1.0 - vAge);
-    float energyScale = 0.5 + vEnergy * 0.7;
+    // Quiet points shrink aggressively: energy 0 → 0.08x, energy 1 → 1.6x
+    float energyScale = 0.08 + vEnergy * 1.52;
 
     gl_PointSize = uPointSize * uPixelRatio * energyScale * alive
                    * (120.0 / max(-mvPosition.z, 0.1));
@@ -62,7 +63,9 @@ export const pointFragmentShader = /* glsl */ `
     color *= 1.1 - vEnergy * 0.3;
 
     float alive = max(0.0, 1.0 - vAge);
-    float alpha = alive * alive * 0.85;
+    // Quiet points fade out: energy 0 → nearly invisible
+    float energyAlpha = 0.04 + vEnergy * 0.96;
+    float alpha = alive * alive * 0.85 * energyAlpha;
 
     gl_FragColor = vec4(color, alpha);
   }
@@ -103,7 +106,8 @@ export const trailFragmentShader = /* glsl */ `
   void main() {
     vec3 color = palette(vCentroid);
     float alive = max(0.0, 1.0 - vAge);
-    float alpha = alive * alive * alive * 0.25;
+    float energyAlpha = 0.04 + vEnergy * 0.96;
+    float alpha = alive * alive * alive * 0.25 * energyAlpha;
 
     gl_FragColor = vec4(color, alpha);
   }

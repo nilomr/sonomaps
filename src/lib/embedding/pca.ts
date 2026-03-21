@@ -1,11 +1,10 @@
 /**
- * Embedding modules for projecting audio features to 2D/3D.
+ * Configurable feature embedding for projecting audio features to 3D.
  *
- * Uses DirectFeatureEmbedding: maps perceptually meaningful features
- * directly to spatial axes with online z-score normalisation.
- *
- * The EmbeddingModel interface allows swapping in a neural model
- * (TF.js / ONNX Runtime Web) without changing the caller.
+ * The user selects which audio feature maps to each spatial axis from
+ * a catalogue of scientifically grounded descriptors. Each axis is
+ * independently z-scored with online EMA statistics so the embedding
+ * auto-scales regardless of mic gain or input level.
  */
 
 import type { MelFeatureExtractor } from '../dsp/mel.js';
@@ -13,14 +12,42 @@ import type { MelFeatureExtractor } from '../dsp/mel.js';
 /** Implement this interface to swap in a neural embedding model. */
 export interface EmbeddingModel {
 	readonly outputDim: number;
-	/** Project features into low-dimensional space. Writes into `out`. */
 	projectFromExtractor(extractor: MelFeatureExtractor, out: Float32Array): void;
 }
 
-/**
- * Online statistics tracker using exponential moving averages.
- * Converges in ~30 frames (~0.5 s at 60 fps).
- */
+// ── Feature catalogue ────────────────────────────────────
+
+export interface FeatureDef {
+	readonly id: string;
+	/** Short name for dropdown UI. */
+	readonly label: string;
+	/** Short label for the 3D axis overlay. */
+	readonly axisLabel: string;
+	/** Extract a scalar value from the current frame. */
+	readonly extract: (ext: MelFeatureExtractor) => number;
+}
+
+export const FEATURES: readonly FeatureDef[] = [
+	{ id: 'centroid',  label: 'Centroid',   axisLabel: 'BRIGHTNESS', extract: ext => Math.log1p(ext.centroid) },
+	{ id: 'bandwidth', label: 'Bandwidth',  axisLabel: 'WIDTH',      extract: ext => Math.log1p(ext.bandwidth) },
+	{ id: 'rolloff',   label: 'Rolloff',    axisLabel: 'ROLLOFF',    extract: ext => Math.log1p(ext.rolloff) },
+	{ id: 'rms',       label: 'RMS Energy', axisLabel: 'ENERGY',     extract: ext => Math.log1p(ext.rms * 500) },
+	{ id: 'zcr',       label: 'Zero Cross', axisLabel: 'NOISINESS',  extract: ext => ext.zcr },
+	{ id: 'flatness',  label: 'Flatness',   axisLabel: 'TONALITY',   extract: ext => ext.flatness },
+	{ id: 'mfcc1',     label: 'MFCC 1',     axisLabel: 'MFCC 1',     extract: ext => ext.mfccs[1] },
+	{ id: 'mfcc2',     label: 'MFCC 2',     axisLabel: 'MFCC 2',     extract: ext => ext.mfccs[2] },
+	{ id: 'mfcc3',     label: 'MFCC 3',     axisLabel: 'MFCC 3',     extract: ext => ext.mfccs[3] },
+	{ id: 'mfcc4',     label: 'MFCC 4',     axisLabel: 'MFCC 4',     extract: ext => ext.mfccs[4] },
+];
+
+const FEATURE_MAP = new Map(FEATURES.map(f => [f.id, f]));
+
+export function getFeature(id: string): FeatureDef {
+	return FEATURE_MAP.get(id) ?? FEATURES[0];
+}
+
+// ── Online z-score normalisation ─────────────────────────
+
 class OnlineStat {
 	mean = 0;
 	variance = 1;
@@ -28,12 +55,11 @@ class OnlineStat {
 	private warmup = 0;
 	private readonly warmupFrames: number;
 
-	constructor(decay = 0.97, warmupFrames = 30) {
+	constructor(decay = 0.995, warmupFrames = 50) {
 		this.decay = decay;
 		this.warmupFrames = warmupFrames;
 	}
 
-	/** Update with new value and return the z-scored result. */
 	update(x: number): number {
 		if (this.warmup < this.warmupFrames) {
 			this.warmup++;
@@ -62,43 +88,32 @@ class OnlineStat {
 	}
 }
 
-/**
- * Maps perceptually meaningful features directly to spatial axes.
- *
- * Axes:
- *   X → log spectral centroid  (dark ↔ bright)
- *   Y → log RMS energy         (quiet ↔ loud)
- *   Z → spectral flatness      (tonal ↔ noisy)
- *
- * Each axis is independently z-scored with online EMA statistics so
- * the embedding auto-scales regardless of mic gain or input level.
- */
+// ── Configurable feature embedding ──────────────────────
+
 export class DirectFeatureEmbedding implements EmbeddingModel {
-	readonly outputDim: number;
+	readonly outputDim = 3;
+	private extractors: ((ext: MelFeatureExtractor) => number)[];
 	private readonly stats: OnlineStat[];
 	private readonly scale: number;
 
-	constructor(outputDim: 2 | 3 = 3, scale = 2.5) {
-		this.outputDim = outputDim;
+	constructor(axes: [string, string, string] = ['centroid', 'bandwidth', 'zcr'], scale = 3.0) {
 		this.scale = scale;
-		// At ~250 samples/sec, decay=0.985 gives ~3s effective window.
-		// warmup=50 converges in ~0.2s.
-		this.stats = Array.from({ length: 3 }, () => new OnlineStat(0.985, 50));
+		this.extractors = axes.map(id => getFeature(id).extract);
+		// At ~250 samples/sec, decay=0.995 gives ~0.8s effective window.
+		this.stats = Array.from({ length: 3 }, () => new OnlineStat(0.995, 50));
+	}
+
+	/** Change which features map to the three spatial axes. Resets statistics. */
+	setAxes(axes: [string, string, string]): void {
+		this.extractors = axes.map(id => getFeature(id).extract);
+		for (const s of this.stats) s.reset();
 	}
 
 	projectFromExtractor(ext: MelFeatureExtractor, out: Float32Array): void {
 		const s = this.scale;
-
-		// X: brightness (log centroid compresses the wide Hz range)
-		out[0] = this.stats[0].update(Math.log1p(ext.centroid)) * s;
-
-		// Y: loudness (log RMS for perceptual scaling)
-		out[1] = this.stats[1].update(Math.log1p(ext.rms * 1000)) * s;
-
-		if (this.outputDim >= 3) {
-			// Z: tonality (spectral flatness, already 0..1)
-			out[2] = this.stats[2].update(ext.flatness) * s;
-		}
+		out[0] = this.stats[0].update(this.extractors[0](ext)) * s;
+		out[1] = this.stats[1].update(this.extractors[1](ext)) * s;
+		out[2] = this.stats[2].update(this.extractors[2](ext)) * s;
 	}
 
 	reset(): void {

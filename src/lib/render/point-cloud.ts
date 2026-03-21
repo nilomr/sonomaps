@@ -267,6 +267,16 @@ export class PointCloudRenderer {
 		this.camera.updateProjectionMatrix();
 	}
 
+	clear(): void {
+		(this.ageAttr.array as Float32Array).fill(1.0);
+		(this.trailAgeAttr.array as Float32Array).fill(1.0);
+		this.head = 0;
+		this.count = 0;
+		this.ageAttr.needsUpdate = true;
+		this.trailAgeAttr.needsUpdate = true;
+		this.trailObj.geometry.setDrawRange(0, 0);
+	}
+
 	dispose(): void {
 		this.controls.dispose();
 		this.pointsObj.geometry.dispose();
