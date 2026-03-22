@@ -49,6 +49,11 @@ export class PointCloudRenderer {
 	private smoothBoxMax = new Float64Array([0, 0, 0]);
 	private boxInitialized = false;
 
+	// ── Camera auto-follow ───────────────────────────────
+	private userInteracting = false;
+	private interactCooldown = 0;
+	private readonly _tmpVec = new THREE.Vector3();
+
 	private readonly maxPoints: number;
 	private head = 0;
 	private count = 0;
@@ -96,6 +101,12 @@ export class PointCloudRenderer {
 		this.controls.enablePan = true;
 		this.controls.minDistance = 3;
 		this.controls.maxDistance = 60;
+
+		this.controls.addEventListener('start', () => { this.userInteracting = true; });
+		this.controls.addEventListener('end', () => {
+			this.userInteracting = false;
+			this.interactCooldown = 90;
+		});
 
 		// Very subtle grid/axis lines — light gray on cream
 		const axisLen = 2.0;
@@ -300,6 +311,43 @@ export class PointCloudRenderer {
 		this.boxObj.visible = true;
 	}
 
+	// ── Camera auto-follow ───────────────────────────────
+	private autoFollowCamera(): void {
+		if (this.interactCooldown > 0) {
+			this.interactCooldown--;
+			return;
+		}
+		if (this.userInteracting || !this.boxInitialized || !this.boxObj.visible) return;
+
+		const cx = (this.smoothBoxMin[0] + this.smoothBoxMax[0]) / 2;
+		const cy = (this.smoothBoxMin[1] + this.smoothBoxMax[1]) / 2;
+		const cz = (this.smoothBoxMin[2] + this.smoothBoxMax[2]) / 2;
+
+		const dx = this.smoothBoxMax[0] - this.smoothBoxMin[0];
+		const dy = this.smoothBoxMax[1] - this.smoothBoxMin[1];
+		const dz = this.smoothBoxMax[2] - this.smoothBoxMin[2];
+		const maxDim = Math.max(dx, dy, dz, 2);
+
+		const fovRad = this.camera.fov * Math.PI / 180;
+		const desiredDist = Math.max(6, maxDim / (2 * Math.tan(fovRad / 2)) * 2.5);
+
+		const lerp = 0.018;
+
+		// Lerp target toward box center
+		this.controls.target.x += (cx - this.controls.target.x) * lerp;
+		this.controls.target.y += (cy - this.controls.target.y) * lerp;
+		this.controls.target.z += (cz - this.controls.target.z) * lerp;
+
+		// Lerp camera distance
+		const dir = this._tmpVec.subVectors(this.camera.position, this.controls.target);
+		const currentDist = dir.length();
+		if (currentDist > 0.1) {
+			const newDist = currentDist + (desiredDist - currentDist) * lerp;
+			dir.normalize().multiplyScalar(newDist);
+			this.camera.position.copy(this.controls.target).add(dir);
+		}
+	}
+
 	addPoints(data: Float32Array, count: number): void {
 		const posArr = this.posAttr.array as Float32Array;
 		const ageArr = this.ageAttr.array as Float32Array;
@@ -366,6 +414,7 @@ export class PointCloudRenderer {
 		this.trailEnergyAttr.needsUpdate = true;
 
 		this.updateBox();
+		this.autoFollowCamera();
 
 		this.controls.update();
 		this.renderer.render(this.scene, this.camera);

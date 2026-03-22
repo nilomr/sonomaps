@@ -34,6 +34,7 @@ export const FEATURES: readonly FeatureDef[] = [
 	{ id: 'rms',       label: 'RMS Energy', axisLabel: 'ENERGY',     extract: ext => Math.log1p(ext.rms * 500) },
 	{ id: 'zcr',       label: 'Zero Cross', axisLabel: 'NOISINESS',  extract: ext => ext.zcr },
 	{ id: 'flatness',  label: 'Flatness',   axisLabel: 'TONALITY',   extract: ext => ext.flatness },
+	{ id: 'peakFreq',  label: 'Peak Freq',  axisLabel: 'PITCH',      extract: ext => Math.log1p(ext.peakFreq) },
 	{ id: 'mfcc1',     label: 'MFCC 1',     axisLabel: 'MFCC 1',     extract: ext => ext.mfccs[1] },
 	{ id: 'mfcc2',     label: 'MFCC 2',     axisLabel: 'MFCC 2',     extract: ext => ext.mfccs[2] },
 	{ id: 'mfcc3',     label: 'MFCC 3',     axisLabel: 'MFCC 3',     extract: ext => ext.mfccs[3] },

@@ -41,6 +41,7 @@ export class MelFeatureExtractor {
 	flatness = 0;       // spectral flatness (0 = tonal, 1 = noise)
 	bandwidth = 0;      // spectral bandwidth (Hz)
 	rolloff = 0;        // spectral rolloff (Hz)
+	peakFreq = 0;       // peak frequency (Hz) — bin with max power
 
 	constructor(config: MelConfig) {
 		const {
@@ -184,6 +185,17 @@ export class MelFeatureExtractor {
 			}
 		}
 		this.rolloff = rolloffBin * (this.sampleRate / this.fftSize);
+
+		// ── Peak frequency (Hz) ─────────────────────────────
+		let maxPow = 0;
+		let peakBin = 0;
+		for (let k = 1; k < numBins; k++) {
+			if (this.powerBuf[k] > maxPow) {
+				maxPow = this.powerBuf[k];
+				peakBin = k;
+			}
+		}
+		this.peakFreq = peakBin * (this.sampleRate / this.fftSize);
 
 		// ── RMS energy (from time-domain data) ───────────────
 		let sumSq = 0;

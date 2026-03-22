@@ -7,18 +7,24 @@
 	import { PointCloudRenderer } from '$lib/render/point-cloud.js';
 	import { MelCloudRenderer } from '$lib/render/mel-cloud.js';
 	import { SpectrogramRenderer } from '$lib/render/spectrogram.js';
+	import { OscilloscopeRenderer } from '$lib/render/oscilloscope.js';
+	import { PitchGaugeRenderer } from '$lib/render/pitch-gauge.js';
 
 	// ── DOM refs ───────────────────────────────────────────
 	let melCanvas: HTMLCanvasElement;
 	let spectroCanvas: HTMLCanvasElement;
 	let pointCanvas: HTMLCanvasElement;
 	let radarCanvas: HTMLCanvasElement;
+	let scopeCanvas: HTMLCanvasElement;
+	let pitchCanvas: HTMLCanvasElement;
 
 	// ── Rendering objects (not reactive) ──────────────────
 	let melCloud: MelCloudRenderer | null = null;
 	let spectrogram: SpectrogramRenderer | null = null;
 	let pointCloud: PointCloudRenderer | null = null;
 	let radarCtx: CanvasRenderingContext2D | null = null;
+	let scope: OscilloscopeRenderer | null = null;
+	let pitchGauge: PitchGaugeRenderer | null = null;
 
 	// ── Audio pipeline (not reactive) ─────────────────────
 	let audioSource: AudioSource | null = null;
@@ -107,11 +113,11 @@
 		private count = 0;
 		private readonly decay: number;
 
-		constructor(decay = 0.98) { this.decay = decay; }
+		constructor(decay = 0.995) { this.decay = decay; }
 
 		update(raw: number): number {
 			this.count++;
-			if (this.count < 8) {
+			if (this.count < 30) {
 				this.mean = raw;
 				return 0.5;
 			}
@@ -145,6 +151,7 @@
 	let frameCount = 0;
 	let lastFpsTime = 0;
 	let featCounter = 0;
+	let isAboveGate = false;
 
 	// ── Formatting helpers ───────────────────────────────
 	function fmtHz(hz: number): string {
@@ -174,7 +181,8 @@
 		}
 
 		const gate = Math.max(noiseFloorEma * noiseThreshold, MIN_GATE);
-		if (rms < gate) return;
+		isAboveGate = rms >= gate;
+		if (!isAboveGate) return;
 
 		embedding.projectFromExtractor(melExtractor, embeddingBuf);
 		smoother.smooth(embeddingBuf);
@@ -370,6 +378,8 @@
 		});
 
 		spectrogram = new SpectrogramRenderer(spectroCanvas, NUM_MEL_BANDS);
+		scope = new OscilloscopeRenderer(scopeCanvas);
+		pitchGauge = new PitchGaugeRenderer(pitchCanvas);
 
 		pointCloud = new PointCloudRenderer(pointCanvas, {
 			maxPoints: MAX_POINTS,
@@ -385,7 +395,7 @@
 		window.addEventListener('resize', onResize);
 
 		function loop() {
-			if (processing && melExtractor) {
+			if (processing && melExtractor && isAboveGate) {
 				melCloud!.addFrame(melExtractor.logMelEnergies);
 				spectrogram?.addColumn(melExtractor.logMelEnergies);
 			}
@@ -394,28 +404,41 @@
 			pointCloud?.render();
 			renderRadar();
 
+			// Oscilloscope + pitch gauge
+			if (processing && audioSource && isAboveGate) {
+				scope?.draw(audioSource.timeData);
+				pitchGauge?.draw(melExtractor?.peakFreq ?? 0);
+			} else {
+				scope?.draw(new Float32Array(0));
+				pitchGauge?.draw(0);
+			}
+
 			featCounter++;
 			if (featCounter % 6 === 0 && processing && melExtractor) {
 				const m = melExtractor;
-				featCentroid = fmtHz(m.centroid);
-				barCentroid = radarNorm.centroid.update(Math.log1p(m.centroid)) * 100;
-				featRms = m.rms.toFixed(3);
-				barRms = radarNorm.rms.update(Math.log1p(m.rms * 1000)) * 100;
-				featZcr = m.zcr.toFixed(3);
-				barZcr = radarNorm.zcr.update(m.zcr) * 100;
-				featFlat = m.flatness.toFixed(3);
-				barFlat = radarNorm.flatness.update(Math.log1p(m.flatness * 1000)) * 100;
-				featBw = fmtHz(m.bandwidth);
-				barBw = radarNorm.bandwidth.update(Math.log1p(m.bandwidth)) * 100;
-				featRol = fmtHz(m.rolloff);
-				barRol = radarNorm.rolloff.update(Math.log1p(m.rolloff)) * 100;
+				// Only update radar normalizers when above noise gate
+				const gate = Math.max(noiseFloorEma * noiseThreshold, MIN_GATE);
+				if (m.rms >= gate) {
+					featCentroid = fmtHz(m.centroid);
+					barCentroid = radarNorm.centroid.update(Math.log1p(m.centroid)) * 100;
+					featRms = m.rms.toFixed(3);
+					barRms = radarNorm.rms.update(Math.log1p(m.rms * 1000)) * 100;
+					featZcr = m.zcr.toFixed(3);
+					barZcr = radarNorm.zcr.update(m.zcr) * 100;
+					featFlat = m.flatness.toFixed(3);
+					barFlat = radarNorm.flatness.update(Math.log1p(m.flatness * 1000)) * 100;
+					featBw = fmtHz(m.bandwidth);
+					barBw = radarNorm.bandwidth.update(Math.log1p(m.bandwidth)) * 100;
+					featRol = fmtHz(m.rolloff);
+					barRol = radarNorm.rolloff.update(Math.log1p(m.rolloff)) * 100;
 
-				// Add radar trail snapshot
-				radarSnapshots.push([
-					barCentroid / 100, barRms / 100, barZcr / 100,
-					barFlat / 100, barBw / 100, barRol / 100
-				]);
-				if (radarSnapshots.length > RADAR_TRAIL_LENGTH) radarSnapshots.shift();
+					// Add radar trail snapshot
+					radarSnapshots.push([
+						barCentroid / 100, barRms / 100, barZcr / 100,
+						barFlat / 100, barBw / 100, barRol / 100
+					]);
+					if (radarSnapshots.length > RADAR_TRAIL_LENGTH) radarSnapshots.shift();
+				}
 			}
 
 			frameCount++;
@@ -477,6 +500,7 @@
 
 			melCloud?.clear();
 			pointCloud?.clear();
+			pitchGauge?.reset();
 
 			processing = true;
 			sampleIntervalId = window.setInterval(sampleAudio, SAMPLE_INTERVAL_MS);
@@ -560,16 +584,42 @@
 		</div>
 	</section>
 
-	<!-- ─── Radar analysis (right) ─── -->
+	<!-- ─── Analysis (right) ─── -->
 	<section class="panel analysis">
-		<canvas bind:this={radarCanvas} class="fill-canvas"></canvas>
+		<div class="analysis-radar">
+			<canvas bind:this={radarCanvas} class="fill-canvas"></canvas>
+		</div>
+		<div class="analysis-pitch">
+			<canvas bind:this={pitchCanvas}></canvas>
+			<span class="panel-label sub">PITCH</span>
+		</div>
+		<div class="analysis-scope">
+			<canvas bind:this={scopeCanvas}></canvas>
+			<span class="panel-label sub">WAVEFORM</span>
+		</div>
 		<span class="panel-label">ANALYSIS</span>
 	</section>
 
 	<!-- ─── Controls bar ─── -->
 	<section class="panel controls-bar">
-		<div class="ctrl-row">
-			<div class="ctrl-group">
+		<!-- Brand -->
+		<div class="ctrl-brand">
+			<div class="brand-text">
+				<span class="brand-top">SONO</span>
+				<span class="brand-bottom">MAPS</span>
+			</div>
+			<div class="brand-status">
+				<span class="status-dot" class:active={isRunning}></span>
+				<span class="status-text">{status}</span>
+			</div>
+		</div>
+
+		<div class="ctrl-sep"></div>
+
+		<!-- Input -->
+		<div class="ctrl-section">
+			<span class="section-label">INPUT</span>
+			<div class="section-body">
 				<button class="ctrl-btn play" class:active={isRunning} onclick={toggle}
 					aria-label={isRunning ? 'Stop' : 'Start'}>
 					{#if isRunning}
@@ -577,64 +627,75 @@
 					{:else}
 						<span class="icon-play"></span>
 					{/if}
-					<span>{isRunning ? 'STOP' : 'START'}</span>
 				</button>
-
-				<button class="ctrl-btn" class:active={inputMode === 'mic'} disabled={isRunning}
-					onclick={() => (inputMode = 'mic')}>MIC</button>
-				<button class="ctrl-btn" class:active={inputMode === 'file'} disabled={isRunning}
-					onclick={() => (inputMode = 'file')}>FILE</button>
-
+				<div class="input-toggle">
+					<button class="toggle-btn" class:active={inputMode === 'mic'} disabled={isRunning}
+						onclick={() => (inputMode = 'mic')}>MIC</button>
+					<button class="toggle-btn" class:active={inputMode === 'file'} disabled={isRunning}
+						onclick={() => (inputMode = 'file')}>FILE</button>
+				</div>
 				{#if inputMode === 'file'}
-					<label class="ctrl-btn file-label">
-						<span>{selectedFile ? selectedFile.name.slice(0, 14).toUpperCase() : 'CHOOSE FILE'}</span>
+					<label class="file-btn">
+						<span>{selectedFile ? selectedFile.name.slice(0, 12).toUpperCase() : 'CHOOSE'}</span>
 						<input type="file" accept="audio/*" onchange={onFileChange}
 							disabled={isRunning} class="file-hidden" />
 					</label>
 				{/if}
 			</div>
+		</div>
 
-			<div class="ctrl-group axes-group">
-				<div class="axis-inline">
+		<div class="ctrl-sep"></div>
+
+		<!-- Projection axes -->
+		<div class="ctrl-section">
+			<span class="section-label">PROJECTION</span>
+			<div class="section-body axes-body">
+				<div class="axis-sel">
 					<span class="ax-tag">X</span>
-					<select class="ax-sel" bind:value={axisX} onchange={onAxesChange}>
+					<select bind:value={axisX} onchange={onAxesChange}>
 						{#each FEATURES as f}<option value={f.id}>{f.label}</option>{/each}
 					</select>
 				</div>
-				<div class="axis-inline">
+				<div class="axis-sel">
 					<span class="ax-tag">Y</span>
-					<select class="ax-sel" bind:value={axisY} onchange={onAxesChange}>
+					<select bind:value={axisY} onchange={onAxesChange}>
 						{#each FEATURES as f}<option value={f.id}>{f.label}</option>{/each}
 					</select>
 				</div>
-				<div class="axis-inline">
+				<div class="axis-sel">
 					<span class="ax-tag">Z</span>
-					<select class="ax-sel" bind:value={axisZ} onchange={onAxesChange}>
+					<select bind:value={axisZ} onchange={onAxesChange}>
 						{#each FEATURES as f}<option value={f.id}>{f.label}</option>{/each}
 					</select>
 				</div>
 			</div>
 		</div>
 
-		<div class="ctrl-row">
-			<div class="slider-group">
-				<span class="slider-label">VOL</span>
-				<input type="range" class="slider" min="0" max="2" step="0.01"
-					bind:value={volume} oninput={onVolumeInput} />
-			</div>
+		<div class="ctrl-sep"></div>
 
-			<div class="slider-group">
-				<span class="slider-label">NOISE THRESHOLD</span>
-				<input type="range" class="slider" min="0.5" max="5" step="0.1"
-					bind:value={noiseThreshold} />
+		<!-- Parameters -->
+		<div class="ctrl-section grow">
+			<span class="section-label">PARAMETERS</span>
+			<div class="section-body params-body">
+				<div class="param">
+					<span class="param-label">VOL</span>
+					<input type="range" class="slider" min="0" max="2" step="0.01"
+						bind:value={volume} oninput={onVolumeInput} />
+				</div>
+				<div class="param">
+					<span class="param-label">GATE</span>
+					<input type="range" class="slider" min="0.5" max="5" step="0.1"
+						bind:value={noiseThreshold} />
+				</div>
 			</div>
+		</div>
 
-			<div class="ctrl-group status-group">
-				<span class="brand-micro">SONOMAPS</span>
-				<span class="status-dot" class:active={isRunning}></span>
-				<span class="status-text">{status}</span>
-				<span class="fps-val">{fps} <span class="fps-unit">FPS</span></span>
-			</div>
+		<div class="ctrl-sep"></div>
+
+		<!-- FPS -->
+		<div class="ctrl-fps">
+			<span class="fps-number">{fps}</span>
+			<span class="fps-label">FPS</span>
 		</div>
 	</section>
 </main>
@@ -767,103 +828,232 @@
 		color: rgba(42, 42, 50, 0.18);
 	}
 
+	/* ── Analysis layout ─────────────────────────── */
+	.analysis {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.analysis-radar {
+		flex: 1;
+		min-height: 0;
+		position: relative;
+	}
+
+	.analysis-pitch {
+		height: 30%;
+		min-height: 80px;
+		border-top: 1px solid rgba(42, 42, 50, 0.08);
+		position: relative;
+	}
+
+	.analysis-pitch canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.analysis-scope {
+		height: 22%;
+		min-height: 50px;
+		border-top: 1px solid rgba(42, 42, 50, 0.08);
+		position: relative;
+	}
+
+	.analysis-scope canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.panel-label.sub {
+		font-size: 9px;
+		color: rgba(42, 42, 50, 0.2);
+	}
+
 	/* ── Controls bar ────────────────────────────── */
 	.controls-bar {
 		display: flex;
+		align-items: center;
+		padding: 12px 24px 16px;
+		gap: 0;
+	}
+
+	/* ── Brand ────────────────────────────────────── */
+	.ctrl-brand {
+		display: flex;
+		align-items: center;
+		gap: 16px;
+		padding-right: 22px;
+		flex-shrink: 0;
+	}
+
+	.brand-text {
+		display: flex;
 		flex-direction: column;
-		padding: 10px 20px;
-		gap: 8px;
+		line-height: 1.15;
 	}
 
-	.ctrl-row {
+	.brand-top {
+		font-size: 15px;
+		font-weight: 600;
+		letter-spacing: 6px;
+		color: rgba(42, 42, 50, 0.48);
+	}
+
+	.brand-bottom {
+		font-size: 15px;
+		font-weight: 300;
+		letter-spacing: 6px;
+		color: rgba(42, 42, 50, 0.28);
+	}
+
+	.brand-status {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 4px;
+	}
+
+	/* ── Separator ───────────────────────────────── */
+	.ctrl-sep {
+		width: 1px;
+		height: 48px;
+		background: rgba(42, 42, 50, 0.08);
+		flex-shrink: 0;
+	}
+
+	/* ── Sections ────────────────────────────────── */
+	.ctrl-section {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 0 20px;
+		flex-shrink: 0;
+	}
+
+	.ctrl-section.grow {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.section-label {
+		font-size: 9px;
+		font-weight: 500;
+		letter-spacing: 2.5px;
+		color: rgba(42, 42, 50, 0.22);
+		line-height: 1;
+	}
+
+	.section-body {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 	}
 
-	.ctrl-group {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
-
-	.ctrl-group + .ctrl-group,
-	.ctrl-group + .axes-group {
-		margin-left: 20px;
-	}
-
-	.axes-group {
-		gap: 10px;
-	}
-
-	.status-group {
-		margin-left: auto;
-		gap: 8px;
-	}
-
-	/* ── Buttons ──────────────────────────────────── */
-	.ctrl-btn {
-		height: 30px;
-		padding: 0 12px;
-		border: 1px solid rgba(42, 42, 50, 0.14);
-		border-radius: 4px;
+	/* ── Play button ─────────────────────────────── */
+	.ctrl-btn.play {
+		width: 36px;
+		height: 36px;
+		padding: 0;
+		border: 1.5px solid rgba(42, 42, 50, 0.18);
+		border-radius: 50%;
 		background: transparent;
 		color: rgba(42, 42, 50, 0.45);
 		font-family: inherit;
-		font-size: 10px;
-		font-weight: 500;
-		letter-spacing: 2px;
 		cursor: pointer;
-		transition: all 0.12s;
+		transition: all 0.15s;
 		display: flex;
 		align-items: center;
-		gap: 7px;
-		white-space: nowrap;
+		justify-content: center;
+		flex-shrink: 0;
 	}
 
-	.ctrl-btn:hover {
-		border-color: rgba(42, 42, 50, 0.3);
-		color: rgba(42, 42, 50, 0.7);
-		background: rgba(42, 42, 50, 0.025);
-	}
-
-	.ctrl-btn.active {
-		border-color: rgba(42, 42, 50, 0.22);
-		color: rgba(42, 42, 50, 0.75);
-		background: rgba(42, 42, 50, 0.04);
-	}
-
-	.ctrl-btn:disabled {
-		opacity: 0.35;
-		cursor: not-allowed;
+	.ctrl-btn.play:hover {
+		border-color: rgba(42, 42, 50, 0.35);
+		background: rgba(42, 42, 50, 0.03);
 	}
 
 	.ctrl-btn.play.active {
-		border-color: rgba(160, 50, 50, 0.3);
-		color: rgba(160, 50, 50, 0.65);
-		background: rgba(160, 50, 50, 0.03);
+		border-color: rgba(160, 50, 50, 0.35);
+		background: rgba(160, 50, 50, 0.04);
 	}
 
 	.icon-play {
 		width: 0;
 		height: 0;
 		border-style: solid;
-		border-width: 5px 0 5px 8px;
+		border-width: 5px 0 5px 9px;
 		border-color: transparent transparent transparent rgba(42, 42, 50, 0.5);
 		flex-shrink: 0;
+		margin-left: 2px;
 	}
 
 	.icon-stop {
-		width: 9px;
-		height: 9px;
+		width: 10px;
+		height: 10px;
 		background: rgba(160, 50, 50, 0.5);
-		border-radius: 1.5px;
+		border-radius: 2px;
 		flex-shrink: 0;
 	}
 
-	.file-label {
-		border-style: dashed;
+	/* ── Input toggle ────────────────────────────── */
+	.input-toggle {
+		display: flex;
+		border: 1px solid rgba(42, 42, 50, 0.12);
+		border-radius: 4px;
+		overflow: hidden;
+	}
+
+	.toggle-btn {
+		padding: 6px 12px;
+		border: none;
+		background: transparent;
+		color: rgba(42, 42, 50, 0.35);
+		font-family: inherit;
+		font-size: 10px;
+		font-weight: 500;
+		letter-spacing: 2px;
 		cursor: pointer;
+		transition: all 0.12s;
+	}
+
+	.toggle-btn:hover {
+		color: rgba(42, 42, 50, 0.6);
+		background: rgba(42, 42, 50, 0.02);
+	}
+
+	.toggle-btn.active {
+		color: rgba(42, 42, 50, 0.7);
+		background: rgba(42, 42, 50, 0.05);
+	}
+
+	.toggle-btn:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
+	}
+
+	.toggle-btn + .toggle-btn {
+		border-left: 1px solid rgba(42, 42, 50, 0.08);
+	}
+
+	.file-btn {
+		padding: 6px 12px;
+		border: 1px dashed rgba(42, 42, 50, 0.18);
+		border-radius: 4px;
+		background: transparent;
+		color: rgba(42, 42, 50, 0.4);
+		font-family: inherit;
+		font-size: 10px;
+		font-weight: 400;
+		letter-spacing: 1px;
+		cursor: pointer;
+		transition: border-color 0.12s;
+		position: relative;
+	}
+
+	.file-btn:hover {
+		border-color: rgba(42, 42, 50, 0.3);
 	}
 
 	.file-hidden {
@@ -875,7 +1065,11 @@
 	}
 
 	/* ── Axis selectors ──────────────────────────── */
-	.axis-inline {
+	.axes-body {
+		gap: 10px;
+	}
+
+	.axis-sel {
 		display: flex;
 		align-items: center;
 		gap: 5px;
@@ -885,15 +1079,15 @@
 		font-size: 10px;
 		font-weight: 600;
 		letter-spacing: 1px;
-		color: rgba(42, 42, 50, 0.5);
+		color: rgba(42, 42, 50, 0.45);
 	}
 
-	.ax-sel {
-		padding: 3px 6px;
+	.axis-sel select {
+		padding: 4px 6px;
 		border: 1px solid rgba(42, 42, 50, 0.1);
 		border-radius: 3px;
 		background: transparent;
-		color: rgba(42, 42, 50, 0.6);
+		color: rgba(42, 42, 50, 0.55);
 		font-family: inherit;
 		font-size: 10px;
 		font-weight: 400;
@@ -903,34 +1097,34 @@
 		transition: border-color 0.12s;
 	}
 
-	.ax-sel:hover { border-color: rgba(42, 42, 50, 0.22); }
-	.ax-sel:focus { border-color: rgba(42, 42, 50, 0.3); }
+	.axis-sel select:hover { border-color: rgba(42, 42, 50, 0.22); }
+	.axis-sel select:focus { border-color: rgba(42, 42, 50, 0.3); }
 
-	/* ── Sliders ─────────────────────────────────── */
-	.slider-group {
+	/* ── Parameters ──────────────────────────────── */
+	.params-body {
+		gap: 20px;
+	}
+
+	.param {
 		display: flex;
 		align-items: center;
 		gap: 10px;
 	}
 
-	.slider-group + .slider-group {
-		margin-left: 24px;
-	}
-
-	.slider-label {
+	.param-label {
 		font-size: 10px;
 		font-weight: 500;
 		letter-spacing: 2px;
-		color: rgba(42, 42, 50, 0.38);
+		color: rgba(42, 42, 50, 0.32);
 		white-space: nowrap;
 	}
 
 	.slider {
 		-webkit-appearance: none;
 		appearance: none;
-		width: 130px;
+		width: 110px;
 		height: 2px;
-		background: rgba(42, 42, 50, 0.15);
+		background: rgba(42, 42, 50, 0.12);
 		border-radius: 1px;
 		outline: none;
 		cursor: pointer;
@@ -938,36 +1132,54 @@
 
 	.slider::-webkit-slider-thumb {
 		-webkit-appearance: none;
-		width: 14px;
-		height: 14px;
+		width: 12px;
+		height: 12px;
 		border-radius: 50%;
 		background: #f2ede4;
-		border: 1.5px solid rgba(42, 42, 50, 0.35);
+		border: 1.5px solid rgba(42, 42, 50, 0.3);
 		cursor: pointer;
 		transition: border-color 0.12s;
 	}
 
 	.slider::-webkit-slider-thumb:hover {
-		border-color: rgba(42, 42, 50, 0.55);
+		border-color: rgba(42, 42, 50, 0.5);
 	}
 
 	.slider::-moz-range-thumb {
-		width: 14px;
-		height: 14px;
+		width: 12px;
+		height: 12px;
 		border-radius: 50%;
 		background: #f2ede4;
-		border: 1.5px solid rgba(42, 42, 50, 0.35);
+		border: 1.5px solid rgba(42, 42, 50, 0.3);
 		cursor: pointer;
 	}
 
-	/* ── Status elements ─────────────────────────── */
-	.brand-micro {
-		font-size: 10px;
-		font-weight: 600;
-		letter-spacing: 3px;
-		color: rgba(42, 42, 50, 0.3);
+	/* ── FPS ──────────────────────────────────────── */
+	.ctrl-fps {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-left: 20px;
+		flex-shrink: 0;
 	}
 
+	.fps-number {
+		font-size: 16px;
+		font-weight: 300;
+		color: rgba(42, 42, 50, 0.3);
+		font-variant-numeric: tabular-nums;
+		line-height: 1;
+	}
+
+	.fps-label {
+		font-size: 8px;
+		font-weight: 500;
+		letter-spacing: 2px;
+		color: rgba(42, 42, 50, 0.18);
+		margin-top: 2px;
+	}
+
+	/* ── Status elements ─────────────────────────── */
 	.status-dot {
 		width: 5px;
 		height: 5px;
@@ -985,21 +1197,6 @@
 		font-size: 10px;
 		font-weight: 400;
 		letter-spacing: 1.5px;
-		color: rgba(42, 42, 50, 0.38);
-	}
-
-	.fps-val {
-		font-size: 11px;
-		font-weight: 400;
-		color: rgba(42, 42, 50, 0.4);
-		font-variant-numeric: tabular-nums;
-		margin-left: 4px;
-	}
-
-	.fps-unit {
-		font-size: 9px;
-		font-weight: 300;
-		letter-spacing: 1px;
-		color: rgba(42, 42, 50, 0.25);
+		color: rgba(42, 42, 50, 0.35);
 	}
 </style>
