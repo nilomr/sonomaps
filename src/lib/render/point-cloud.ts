@@ -1,5 +1,5 @@
 /**
- * Point cloud + trail renderer.
+ * Point cloud + trail renderer with adaptive bounding box.
  *
  * Light cream background, dark monochrome data points.
  * Clean, precise, data-visualization aesthetic.
@@ -42,6 +42,13 @@ export class PointCloudRenderer {
 	private trailIndices!: Uint16Array;
 	private trailIndexAttr!: THREE.BufferAttribute;
 
+	// ── Bounding box ─────────────────────────────────────
+	private boxObj!: THREE.LineSegments;
+	private boxPosAttr!: THREE.BufferAttribute;
+	private smoothBoxMin = new Float64Array([0, 0, 0]);
+	private smoothBoxMax = new Float64Array([0, 0, 0]);
+	private boxInitialized = false;
+
 	private readonly maxPoints: number;
 	private head = 0;
 	private count = 0;
@@ -60,6 +67,7 @@ export class PointCloudRenderer {
 		this.initScene();
 		this.initPoints(pointSize);
 		this.initTrail();
+		this.initBox();
 		this.resize();
 	}
 
@@ -187,6 +195,111 @@ export class PointCloudRenderer {
 		this.scene.add(this.trailObj);
 	}
 
+	// ── Bounding box ─────────────────────────────────────
+	private initBox(): void {
+		const geo = new THREE.BufferGeometry();
+		const positions = new Float32Array(24 * 3); // 12 edges × 2 vertices
+		this.boxPosAttr = new THREE.BufferAttribute(positions, 3);
+		this.boxPosAttr.setUsage(THREE.DynamicDrawUsage);
+		geo.setAttribute('position', this.boxPosAttr);
+
+		const mat = new THREE.LineBasicMaterial({
+			color: 0x2a2a32,
+			transparent: true,
+			opacity: 0.1
+		});
+
+		this.boxObj = new THREE.LineSegments(geo, mat);
+		this.boxObj.visible = false;
+		this.scene.add(this.boxObj);
+	}
+
+	private updateBox(): void {
+		const posArr = this.posAttr.array as Float32Array;
+		const ageArr = this.ageAttr.array as Float32Array;
+
+		let minX = Infinity, maxX = -Infinity;
+		let minY = Infinity, maxY = -Infinity;
+		let minZ = Infinity, maxZ = -Infinity;
+		let activeCount = 0;
+
+		for (let i = 0; i < this.maxPoints; i++) {
+			if (ageArr[i] >= 0.9) continue;
+			activeCount++;
+			const i3 = i * 3;
+			const x = posArr[i3], y = posArr[i3 + 1], z = posArr[i3 + 2];
+			if (x < minX) minX = x;
+			if (x > maxX) maxX = x;
+			if (y < minY) minY = y;
+			if (y > maxY) maxY = y;
+			if (z < minZ) minZ = z;
+			if (z > maxZ) maxZ = z;
+		}
+
+		if (activeCount < 2) {
+			this.boxObj.visible = false;
+			return;
+		}
+
+		// Margin
+		const pad = 0.2;
+		minX -= pad; minY -= pad; minZ -= pad;
+		maxX += pad; maxY += pad; maxZ += pad;
+
+		if (!this.boxInitialized) {
+			this.smoothBoxMin[0] = minX;
+			this.smoothBoxMin[1] = minY;
+			this.smoothBoxMin[2] = minZ;
+			this.smoothBoxMax[0] = maxX;
+			this.smoothBoxMax[1] = maxY;
+			this.smoothBoxMax[2] = maxZ;
+			this.boxInitialized = true;
+		} else {
+			// Asymmetric smoothing: fast expand, slow contract
+			const ed = 0.85, cd = 0.995;
+			const rawMins = [minX, minY, minZ];
+			const rawMaxs = [maxX, maxY, maxZ];
+			for (let d = 0; d < 3; d++) {
+				this.smoothBoxMin[d] = rawMins[d] < this.smoothBoxMin[d]
+					? ed * this.smoothBoxMin[d] + (1 - ed) * rawMins[d]
+					: cd * this.smoothBoxMin[d] + (1 - cd) * rawMins[d];
+				this.smoothBoxMax[d] = rawMaxs[d] > this.smoothBoxMax[d]
+					? ed * this.smoothBoxMax[d] + (1 - ed) * rawMaxs[d]
+					: cd * this.smoothBoxMax[d] + (1 - cd) * rawMaxs[d];
+			}
+		}
+
+		// Write 12 edges (24 vertices)
+		const p = this.boxPosAttr.array as Float32Array;
+		const x0 = this.smoothBoxMin[0], y0 = this.smoothBoxMin[1], z0 = this.smoothBoxMin[2];
+		const x1 = this.smoothBoxMax[0], y1 = this.smoothBoxMax[1], z1 = this.smoothBoxMax[2];
+
+		let vi = 0;
+		const e = (ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
+			p[vi++] = ax; p[vi++] = ay; p[vi++] = az;
+			p[vi++] = bx; p[vi++] = by; p[vi++] = bz;
+		};
+
+		// Bottom face
+		e(x0, y0, z0, x1, y0, z0);
+		e(x1, y0, z0, x1, y0, z1);
+		e(x1, y0, z1, x0, y0, z1);
+		e(x0, y0, z1, x0, y0, z0);
+		// Top face
+		e(x0, y1, z0, x1, y1, z0);
+		e(x1, y1, z0, x1, y1, z1);
+		e(x1, y1, z1, x0, y1, z1);
+		e(x0, y1, z1, x0, y1, z0);
+		// Verticals
+		e(x0, y0, z0, x0, y1, z0);
+		e(x1, y0, z0, x1, y1, z0);
+		e(x1, y0, z1, x1, y1, z1);
+		e(x0, y0, z1, x0, y1, z1);
+
+		this.boxPosAttr.needsUpdate = true;
+		this.boxObj.visible = true;
+	}
+
 	addPoints(data: Float32Array, count: number): void {
 		const posArr = this.posAttr.array as Float32Array;
 		const ageArr = this.ageAttr.array as Float32Array;
@@ -252,6 +365,8 @@ export class PointCloudRenderer {
 		this.trailCentroidAttr.needsUpdate = true;
 		this.trailEnergyAttr.needsUpdate = true;
 
+		this.updateBox();
+
 		this.controls.update();
 		this.renderer.render(this.scene, this.camera);
 	}
@@ -275,6 +390,8 @@ export class PointCloudRenderer {
 		this.ageAttr.needsUpdate = true;
 		this.trailAgeAttr.needsUpdate = true;
 		this.trailObj.geometry.setDrawRange(0, 0);
+		this.boxObj.visible = false;
+		this.boxInitialized = false;
 	}
 
 	dispose(): void {
@@ -283,6 +400,8 @@ export class PointCloudRenderer {
 		(this.pointsObj.material as THREE.ShaderMaterial).dispose();
 		this.trailObj.geometry.dispose();
 		(this.trailObj.material as THREE.ShaderMaterial).dispose();
+		this.boxObj.geometry.dispose();
+		(this.boxObj.material as THREE.LineBasicMaterial).dispose();
 		this.renderer.dispose();
 	}
 }

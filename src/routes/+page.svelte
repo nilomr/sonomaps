@@ -5,19 +5,20 @@
 	import { DirectFeatureEmbedding, FEATURES, getFeature } from '$lib/embedding/pca.js';
 	import { EmbeddingSmoother } from '$lib/embedding/smoother.js';
 	import { PointCloudRenderer } from '$lib/render/point-cloud.js';
+	import { MelCloudRenderer } from '$lib/render/mel-cloud.js';
 	import { SpectrogramRenderer } from '$lib/render/spectrogram.js';
 
 	// ── DOM refs ───────────────────────────────────────────
-	let pointCanvas: HTMLCanvasElement;
+	let melCanvas: HTMLCanvasElement;
 	let spectroCanvas: HTMLCanvasElement;
+	let pointCanvas: HTMLCanvasElement;
 	let radarCanvas: HTMLCanvasElement;
-	let histCanvas: HTMLCanvasElement;
 
 	// ── Rendering objects (not reactive) ──────────────────
-	let pointCloud: PointCloudRenderer | null = null;
+	let melCloud: MelCloudRenderer | null = null;
 	let spectrogram: SpectrogramRenderer | null = null;
+	let pointCloud: PointCloudRenderer | null = null;
 	let radarCtx: CanvasRenderingContext2D | null = null;
-	let histCtx: CanvasRenderingContext2D | null = null;
 
 	// ── Audio pipeline (not reactive) ─────────────────────
 	let audioSource: AudioSource | null = null;
@@ -35,6 +36,8 @@
 	let fps = $state(0);
 	let selectedFile = $state<File | null>(null);
 	let status = $state('READY');
+	let volume = $state(1.0);
+	let noiseThreshold = $state(1.8);
 
 	// ── Fixed parameters ─────────────────────────────────
 	const smoothing = 0.35;
@@ -69,10 +72,15 @@
 	let barBw = $state(0);
 	let barRol = $state(0);
 
+	// ── Radar trail history ──────────────────────────────
+	const RADAR_TRAIL_LENGTH = 15;
+	let radarSnapshots: number[][] = [];
+
 	const FFT_SIZE = 2048;
 	const NUM_MEL_BANDS = 80;
 	const MAX_POINTS = 4000;
 	const SAMPLE_INTERVAL_MS = 4;
+	const MIN_GATE = 0.0005;
 
 	// ── Pre-allocated buffers ─────────────────────────────
 	const embeddingBuf = new Float32Array(3);
@@ -92,13 +100,47 @@
 		return Math.max(0, Math.min(1, 0.5 + (raw - ema) / (4 * std)));
 	}
 
+	// ── Per-feature online normalizer for radar ──────────
+	class FeatureNormalizer {
+		private mean = 0;
+		private variance = 1;
+		private count = 0;
+		private readonly decay: number;
+
+		constructor(decay = 0.98) { this.decay = decay; }
+
+		update(raw: number): number {
+			this.count++;
+			if (this.count < 8) {
+				this.mean = raw;
+				return 0.5;
+			}
+			const d = this.decay;
+			this.mean = d * this.mean + (1 - d) * raw;
+			const diff = raw - this.mean;
+			this.variance = d * this.variance + (1 - d) * diff * diff;
+			const std = Math.sqrt(this.variance);
+			if (std < 1e-8) return 0.5;
+			return Math.max(0, Math.min(1, 0.5 + diff / (4 * std)));
+		}
+
+		reset(): void { this.mean = 0; this.variance = 1; this.count = 0; }
+	}
+
+	const radarNorm = {
+		centroid: new FeatureNormalizer(),
+		rms: new FeatureNormalizer(),
+		zcr: new FeatureNormalizer(),
+		flatness: new FeatureNormalizer(),
+		bandwidth: new FeatureNormalizer(),
+		rolloff: new FeatureNormalizer()
+	};
+
 	// ── Adaptive noise gate ──────────────────────────────
 	let noiseFloorEma = 0;
 	let noiseFloorInitialized = false;
 	const NOISE_FLOOR_DECAY = 0.998;
 	const NOISE_FLOOR_UP = 0.95;
-	const GATE_MULT = 1.8;
-	const MIN_GATE = 0.0005;
 
 	let frameCount = 0;
 	let lastFpsTime = 0;
@@ -109,17 +151,6 @@
 		if (hz >= 10000) return (hz / 1000).toFixed(0) + 'k';
 		if (hz >= 1000) return (hz / 1000).toFixed(1) + 'k';
 		return Math.round(hz).toString();
-	}
-
-	function normLog(value: number, min: number, max: number): number {
-		const v = Math.log1p(value);
-		const lo = Math.log1p(min);
-		const hi = Math.log1p(max);
-		return Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
-	}
-
-	function normLin(value: number, min: number, max: number): number {
-		return Math.max(0, Math.min(1, (value - min) / (max - min)));
 	}
 
 	// ── High-frequency audio sampling (~250Hz) ───────────
@@ -142,7 +173,7 @@
 			}
 		}
 
-		const gate = Math.max(noiseFloorEma * GATE_MULT, MIN_GATE);
+		const gate = Math.max(noiseFloorEma * noiseThreshold, MIN_GATE);
 		if (rms < gate) return;
 
 		embedding.projectFromExtractor(melExtractor, embeddingBuf);
@@ -175,7 +206,7 @@
 		pointCloud!.addPoints(pointData, 1);
 	}
 
-	// ── Radar chart rendering ───────────────────────────
+	// ── HiDPI canvas helper ─────────────────────────────
 	function resizeHiDPI(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
 		const dpr = window.devicePixelRatio || 1;
 		const w = Math.round(canvas.clientWidth);
@@ -190,6 +221,7 @@
 		}
 	}
 
+	// ── Radar chart rendering ───────────────────────────
 	function renderRadar(): void {
 		if (!radarCtx || !radarCanvas) return;
 		resizeHiDPI(radarCanvas, radarCtx);
@@ -245,7 +277,28 @@
 			radarCtx.stroke();
 		}
 
-		// Data polygon — fill
+		// ── Trail polygons (oldest first) ───────────────
+		for (let t = 0; t < radarSnapshots.length; t++) {
+			const snap = radarSnapshots[t];
+			const trailAge = (radarSnapshots.length - t) / (radarSnapshots.length + 1);
+			const trailAlpha = Math.max(0.008, (1 - trailAge * trailAge) * 0.08);
+
+			radarCtx.fillStyle = `rgba(42,42,50,${trailAlpha.toFixed(4)})`;
+			radarCtx.beginPath();
+			for (let i = 0; i <= n; i++) {
+				const idx = i % n;
+				const a = start + idx * step;
+				const r = radius * Math.max(0.03, snap[idx]);
+				const x = cx + Math.cos(a) * r;
+				const y = cy + Math.sin(a) * r;
+				if (i === 0) radarCtx.moveTo(x, y);
+				else radarCtx.lineTo(x, y);
+			}
+			radarCtx.closePath();
+			radarCtx.fill();
+		}
+
+		// ── Current polygon — fill ──────────────────────
 		radarCtx.fillStyle = 'rgba(42,42,50,0.045)';
 		radarCtx.beginPath();
 		for (let i = 0; i <= n; i++) {
@@ -260,7 +313,7 @@
 		radarCtx.closePath();
 		radarCtx.fill();
 
-		// Data polygon — stroke
+		// ── Current polygon — stroke ────────────────────
 		radarCtx.strokeStyle = 'rgba(42,42,50,0.38)';
 		radarCtx.lineWidth = 1.5;
 		radarCtx.beginPath();
@@ -295,68 +348,28 @@
 			const x = cx + Math.cos(a) * lr;
 			const y = cy + Math.sin(a) * lr;
 
-			// Feature name
 			radarCtx.fillStyle = 'rgba(42,42,50,0.38)';
 			radarCtx.font = '500 9px "JetBrains Mono"';
 			radarCtx.textAlign = 'center';
 			radarCtx.textBaseline = 'middle';
 			radarCtx.fillText(features[i].label, x, y - 6);
 
-			// Feature value
 			radarCtx.fillStyle = 'rgba(42,42,50,0.58)';
 			radarCtx.font = '400 10px "JetBrains Mono"';
 			radarCtx.fillText(features[i].val, x, y + 7);
 		}
 	}
 
-	// ── Frequency histogram rendering ───────────────────
-	function renderHistogram(): void {
-		if (!histCtx || !histCanvas) return;
-		resizeHiDPI(histCanvas, histCtx);
-
-		const w = histCanvas.clientWidth;
-		const h = histCanvas.clientHeight;
-		if (w === 0 || h === 0) return;
-
-		histCtx.fillStyle = '#f2ede4';
-		histCtx.fillRect(0, 0, w, h);
-
-		if (!processing || !melExtractor) return;
-
-		const energies = melExtractor.logMelEnergies;
-		if (!energies || energies.length === 0) return;
-
-		const n = energies.length;
-
-		// Dynamic range
-		let eMin = Infinity, eMax = -Infinity;
-		for (let i = 0; i < n; i++) {
-			if (energies[i] < eMin) eMin = energies[i];
-			if (energies[i] > eMax) eMax = energies[i];
-		}
-		const range = eMax - eMin || 1;
-
-		const gap = 1;
-		const barW = (w - gap * (n - 1)) / n;
-		const padTop = 32;
-		const padBottom = 4;
-		const drawH = h - padTop - padBottom;
-
-		for (let i = 0; i < n; i++) {
-			const norm = Math.max(0, (energies[i] - eMin) / range);
-			const barH = norm * drawH * 0.92;
-			const x = i * (barW + gap);
-			const y = h - padBottom - barH;
-			const alpha = 0.08 + norm * 0.5;
-			histCtx.fillStyle = `rgba(42,42,50,${alpha.toFixed(3)})`;
-			histCtx.fillRect(x, y, Math.max(1, barW), barH);
-		}
-	}
-
 	// ── Lifecycle ─────────────────────────────────────────
 	onMount(() => {
 		radarCtx = radarCanvas.getContext('2d');
-		histCtx = histCanvas.getContext('2d');
+
+		melCloud = new MelCloudRenderer(melCanvas, {
+			maxFrames: 250,
+			numBands: NUM_MEL_BANDS
+		});
+
+		spectrogram = new SpectrogramRenderer(spectroCanvas, NUM_MEL_BANDS);
 
 		pointCloud = new PointCloudRenderer(pointCanvas, {
 			maxPoints: MAX_POINTS,
@@ -364,38 +377,45 @@
 			pointSize: 1.8
 		});
 
-		spectrogram = new SpectrogramRenderer(spectroCanvas, NUM_MEL_BANDS);
-
 		const onResize = () => {
-			pointCloud?.resize();
+			melCloud?.resize();
 			spectrogram?.resize();
+			pointCloud?.resize();
 		};
 		window.addEventListener('resize', onResize);
 
 		function loop() {
 			if (processing && melExtractor) {
-				spectrogram!.addColumn(melExtractor.logMelEnergies);
+				melCloud!.addFrame(melExtractor.logMelEnergies);
+				spectrogram?.addColumn(melExtractor.logMelEnergies);
 			}
 
-			renderRadar();
-			renderHistogram();
+			melCloud?.render();
 			pointCloud?.render();
+			renderRadar();
 
 			featCounter++;
 			if (featCounter % 6 === 0 && processing && melExtractor) {
 				const m = melExtractor;
 				featCentroid = fmtHz(m.centroid);
-				barCentroid = normLog(m.centroid, 50, 10000) * 100;
+				barCentroid = radarNorm.centroid.update(Math.log1p(m.centroid)) * 100;
 				featRms = m.rms.toFixed(3);
-				barRms = normLin(m.rms, 0, 0.15) * 100;
+				barRms = radarNorm.rms.update(Math.log1p(m.rms * 1000)) * 100;
 				featZcr = m.zcr.toFixed(3);
-				barZcr = normLin(m.zcr, 0, 0.5) * 100;
+				barZcr = radarNorm.zcr.update(m.zcr) * 100;
 				featFlat = m.flatness.toFixed(3);
-				barFlat = m.flatness * 100;
+				barFlat = radarNorm.flatness.update(Math.log1p(m.flatness * 1000)) * 100;
 				featBw = fmtHz(m.bandwidth);
-				barBw = normLog(m.bandwidth, 50, 8000) * 100;
+				barBw = radarNorm.bandwidth.update(Math.log1p(m.bandwidth)) * 100;
 				featRol = fmtHz(m.rolloff);
-				barRol = normLog(m.rolloff, 100, 15000) * 100;
+				barRol = radarNorm.rolloff.update(Math.log1p(m.rolloff)) * 100;
+
+				// Add radar trail snapshot
+				radarSnapshots.push([
+					barCentroid / 100, barRms / 100, barZcr / 100,
+					barFlat / 100, barBw / 100, barRol / 100
+				]);
+				if (radarSnapshots.length > RADAR_TRAIL_LENGTH) radarSnapshots.shift();
 			}
 
 			frameCount++;
@@ -416,6 +436,7 @@
 			clearInterval(sampleIntervalId);
 			window.removeEventListener('resize', onResize);
 			stop();
+			melCloud?.dispose();
 			pointCloud?.dispose();
 		};
 	});
@@ -435,6 +456,8 @@
 				return;
 			}
 
+			audioSource.setVolume(volume);
+
 			melExtractor = new MelFeatureExtractor({
 				sampleRate: audioSource.sampleRate,
 				fftSize: FFT_SIZE,
@@ -449,6 +472,11 @@
 			centroidEma = 0; centroidVar = 1;
 			warmupCount = 0;
 			noiseFloorEma = 0; noiseFloorInitialized = false;
+			radarSnapshots = [];
+			for (const n of Object.values(radarNorm)) n.reset();
+
+			melCloud?.clear();
+			pointCloud?.clear();
 
 			processing = true;
 			sampleIntervalId = window.setInterval(sampleAudio, SAMPLE_INTERVAL_MS);
@@ -486,6 +514,10 @@
 			selectedFile = input.files[0];
 		}
 	}
+
+	function onVolumeInput() {
+		audioSource?.setVolume(volume);
+	}
 </script>
 
 <svelte:head>
@@ -496,16 +528,29 @@
 </svelte:head>
 
 <main>
-	<!-- ─── Embedding (top-left) ─── -->
-	<section class="panel embedding">
-		<canvas bind:this={pointCanvas}></canvas>
-		<span class="panel-label">EMBEDDING</span>
-
+	<!-- ─── Mel cloud (left) ─── -->
+	<section class="panel mel-cloud">
+		<div class="mel-3d">
+			<canvas bind:this={melCanvas}></canvas>
+		</div>
+		<div class="mel-2d">
+			<canvas bind:this={spectroCanvas}></canvas>
+		</div>
+		<span class="panel-label">MEL SPECTROGRAM</span>
 		<div class="corner tl"></div>
 		<div class="corner tr"></div>
 		<div class="corner bl"></div>
 		<div class="corner br"></div>
+	</section>
 
+	<!-- ─── Trajectory (center) ─── -->
+	<section class="panel trajectory">
+		<canvas bind:this={pointCanvas}></canvas>
+		<span class="panel-label">TRAJECTORY</span>
+		<div class="corner tl"></div>
+		<div class="corner tr"></div>
+		<div class="corner bl"></div>
+		<div class="corner br"></div>
 		<div class="axes-overlay">
 			<span class="ax-key">X</span> {getFeature(axisX).axisLabel}
 			<span class="ax-sep">/</span>
@@ -515,87 +560,81 @@
 		</div>
 	</section>
 
-	<!-- ─── Analysis radar (top-right) ─── -->
+	<!-- ─── Radar analysis (right) ─── -->
 	<section class="panel analysis">
 		<canvas bind:this={radarCanvas} class="fill-canvas"></canvas>
 		<span class="panel-label">ANALYSIS</span>
 	</section>
 
-	<!-- ─── Spectrogram (bottom-left) ─── -->
-	<section class="panel spectrogram">
-		<canvas bind:this={spectroCanvas}></canvas>
-		<span class="panel-label">SPECTROGRAM</span>
-		<div class="spec-freq">
-			<span>HI</span>
-			<span>LO</span>
-		</div>
-	</section>
-
-	<!-- ─── Frequency histogram (bottom-right) ─── -->
-	<section class="panel spectrum">
-		<canvas bind:this={histCanvas} class="fill-canvas"></canvas>
-		<span class="panel-label">SPECTRUM</span>
-	</section>
-
-	<!-- ─── Controls bar (bottom full-width) ─── -->
+	<!-- ─── Controls bar ─── -->
 	<section class="panel controls-bar">
-		<div class="ctrl-group">
-			<button class="ctrl-btn play" class:active={isRunning} onclick={toggle}
-				aria-label={isRunning ? 'Stop' : 'Start'}>
-				{#if isRunning}
-					<span class="icon-stop"></span>
-				{:else}
-					<span class="icon-play"></span>
+		<div class="ctrl-row">
+			<div class="ctrl-group">
+				<button class="ctrl-btn play" class:active={isRunning} onclick={toggle}
+					aria-label={isRunning ? 'Stop' : 'Start'}>
+					{#if isRunning}
+						<span class="icon-stop"></span>
+					{:else}
+						<span class="icon-play"></span>
+					{/if}
+					<span>{isRunning ? 'STOP' : 'START'}</span>
+				</button>
+
+				<button class="ctrl-btn" class:active={inputMode === 'mic'} disabled={isRunning}
+					onclick={() => (inputMode = 'mic')}>MIC</button>
+				<button class="ctrl-btn" class:active={inputMode === 'file'} disabled={isRunning}
+					onclick={() => (inputMode = 'file')}>FILE</button>
+
+				{#if inputMode === 'file'}
+					<label class="ctrl-btn file-label">
+						<span>{selectedFile ? selectedFile.name.slice(0, 14).toUpperCase() : 'CHOOSE FILE'}</span>
+						<input type="file" accept="audio/*" onchange={onFileChange}
+							disabled={isRunning} class="file-hidden" />
+					</label>
 				{/if}
-				<span>{isRunning ? 'STOP' : 'START'}</span>
-			</button>
-
-			<button class="ctrl-btn" class:active={inputMode === 'mic'} disabled={isRunning}
-				onclick={() => (inputMode = 'mic')}>MIC</button>
-			<button class="ctrl-btn" class:active={inputMode === 'file'} disabled={isRunning}
-				onclick={() => (inputMode = 'file')}>FILE</button>
-
-			{#if inputMode === 'file'}
-				<label class="ctrl-btn file-label">
-					<span>{selectedFile ? selectedFile.name.slice(0, 14).toUpperCase() : 'CHOOSE FILE'}</span>
-					<input type="file" accept="audio/*" onchange={onFileChange}
-						disabled={isRunning} class="file-hidden" />
-				</label>
-			{/if}
-		</div>
-
-		<div class="ctrl-group axes-group">
-			<div class="axis-inline">
-				<span class="ax-tag">X</span>
-				<select class="ax-sel" bind:value={axisX} onchange={onAxesChange}>
-					{#each FEATURES as f}
-						<option value={f.id}>{f.label}</option>
-					{/each}
-				</select>
 			</div>
-			<div class="axis-inline">
-				<span class="ax-tag">Y</span>
-				<select class="ax-sel" bind:value={axisY} onchange={onAxesChange}>
-					{#each FEATURES as f}
-						<option value={f.id}>{f.label}</option>
-					{/each}
-				</select>
-			</div>
-			<div class="axis-inline">
-				<span class="ax-tag">Z</span>
-				<select class="ax-sel" bind:value={axisZ} onchange={onAxesChange}>
-					{#each FEATURES as f}
-						<option value={f.id}>{f.label}</option>
-					{/each}
-				</select>
+
+			<div class="ctrl-group axes-group">
+				<div class="axis-inline">
+					<span class="ax-tag">X</span>
+					<select class="ax-sel" bind:value={axisX} onchange={onAxesChange}>
+						{#each FEATURES as f}<option value={f.id}>{f.label}</option>{/each}
+					</select>
+				</div>
+				<div class="axis-inline">
+					<span class="ax-tag">Y</span>
+					<select class="ax-sel" bind:value={axisY} onchange={onAxesChange}>
+						{#each FEATURES as f}<option value={f.id}>{f.label}</option>{/each}
+					</select>
+				</div>
+				<div class="axis-inline">
+					<span class="ax-tag">Z</span>
+					<select class="ax-sel" bind:value={axisZ} onchange={onAxesChange}>
+						{#each FEATURES as f}<option value={f.id}>{f.label}</option>{/each}
+					</select>
+				</div>
 			</div>
 		</div>
 
-		<div class="ctrl-group status-group">
-			<span class="brand-micro">SONOMAPS</span>
-			<span class="status-dot" class:active={isRunning}></span>
-			<span class="status-text">{status}</span>
-			<span class="fps-val">{fps} <span class="fps-unit">FPS</span></span>
+		<div class="ctrl-row">
+			<div class="slider-group">
+				<span class="slider-label">VOL</span>
+				<input type="range" class="slider" min="0" max="2" step="0.01"
+					bind:value={volume} oninput={onVolumeInput} />
+			</div>
+
+			<div class="slider-group">
+				<span class="slider-label">NOISE THRESHOLD</span>
+				<input type="range" class="slider" min="0.5" max="5" step="0.1"
+					bind:value={noiseThreshold} />
+			</div>
+
+			<div class="ctrl-group status-group">
+				<span class="brand-micro">SONOMAPS</span>
+				<span class="status-dot" class:active={isRunning}></span>
+				<span class="status-text">{status}</span>
+				<span class="fps-val">{fps} <span class="fps-unit">FPS</span></span>
+			</div>
 		</div>
 	</section>
 </main>
@@ -617,12 +656,11 @@
 		width: 100vw;
 		height: 100vh;
 		display: grid;
-		grid-template-columns: 1.3fr 1fr;
-		grid-template-rows: 1fr 200px auto;
+		grid-template-columns: 1fr 1fr 0.55fr;
+		grid-template-rows: 1fr auto;
 		grid-template-areas:
-			"embedding analysis"
-			"spectrogram spectrum"
-			"controls controls";
+			"mel traj radar"
+			"ctrl ctrl ctrl";
 		gap: 1px;
 		background: rgba(42, 42, 50, 0.12);
 	}
@@ -646,33 +684,70 @@
 		z-index: 2;
 	}
 
-	/* ── Embedding panel ─────────────────────────── */
-	.embedding {
-		grid-area: embedding;
+	/* ── Panels ──────────────────────────────────── */
+	.mel-cloud { grid-area: mel; }
+	.trajectory { grid-area: traj; }
+	.analysis { grid-area: radar; }
+	.controls-bar { grid-area: ctrl; }
+
+	.mel-cloud {
+		display: flex;
+		flex-direction: column;
 	}
 
-	.embedding canvas {
+	.mel-3d {
+		flex: 1;
+		min-height: 0;
+	}
+
+	.mel-3d canvas {
 		width: 100%;
 		height: 100%;
 		display: block;
 	}
 
+	.mel-2d {
+		height: 10%;
+		min-height: 28px;
+		border-top: 1px solid rgba(42, 42, 50, 0.08);
+	}
+
+	.mel-2d canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.trajectory canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.fill-canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	/* ── Corner marks ────────────────────────────── */
 	.corner {
 		position: absolute;
-		width: 24px;
-		height: 24px;
+		width: 22px;
+		height: 22px;
 		pointer-events: none;
 		z-index: 1;
 	}
-	.corner.tl { top: 12px; left: 12px; border-left: 1px solid rgba(42,42,50,0.18); border-top: 1px solid rgba(42,42,50,0.18); }
-	.corner.tr { top: 12px; right: 12px; border-right: 1px solid rgba(42,42,50,0.18); border-top: 1px solid rgba(42,42,50,0.18); }
-	.corner.bl { bottom: 12px; left: 12px; border-left: 1px solid rgba(42,42,50,0.18); border-bottom: 1px solid rgba(42,42,50,0.18); }
-	.corner.br { bottom: 12px; right: 12px; border-right: 1px solid rgba(42,42,50,0.18); border-bottom: 1px solid rgba(42,42,50,0.18); }
+	.corner.tl { top: 10px; left: 10px; border-left: 1px solid rgba(42,42,50,0.16); border-top: 1px solid rgba(42,42,50,0.16); }
+	.corner.tr { top: 10px; right: 10px; border-right: 1px solid rgba(42,42,50,0.16); border-top: 1px solid rgba(42,42,50,0.16); }
+	.corner.bl { bottom: 10px; left: 10px; border-left: 1px solid rgba(42,42,50,0.16); border-bottom: 1px solid rgba(42,42,50,0.16); }
+	.corner.br { bottom: 10px; right: 10px; border-right: 1px solid rgba(42,42,50,0.16); border-bottom: 1px solid rgba(42,42,50,0.16); }
 
+	/* ── Axes overlay ────────────────────────────── */
 	.axes-overlay {
 		position: absolute;
-		bottom: 20px;
-		left: 44px;
+		bottom: 18px;
+		left: 40px;
 		font-size: 10px;
 		font-weight: 400;
 		letter-spacing: 1.5px;
@@ -692,59 +767,18 @@
 		color: rgba(42, 42, 50, 0.18);
 	}
 
-	/* ── Analysis panel ──────────────────────────── */
-	.analysis {
-		grid-area: analysis;
-	}
-
-	.fill-canvas {
-		width: 100%;
-		height: 100%;
-		display: block;
-	}
-
-	/* ── Spectrogram panel ────────────────────────── */
-	.spectrogram {
-		grid-area: spectrogram;
-	}
-
-	.spectrogram canvas {
-		width: 100%;
-		height: 100%;
-		display: block;
-	}
-
-	.spec-freq {
-		position: absolute;
-		right: 14px;
-		top: 12px;
-		bottom: 8px;
-		display: flex;
-		flex-direction: column;
-		justify-content: space-between;
-		pointer-events: none;
-	}
-
-	.spec-freq span {
-		font-size: 9px;
-		font-weight: 400;
-		letter-spacing: 1px;
-		color: rgba(42, 42, 50, 0.26);
-	}
-
-	/* ── Spectrum / histogram panel ──────────────── */
-	.spectrum {
-		grid-area: spectrum;
-	}
-
 	/* ── Controls bar ────────────────────────────── */
 	.controls-bar {
-		grid-area: controls;
+		display: flex;
+		flex-direction: column;
+		padding: 10px 20px;
+		gap: 8px;
+	}
+
+	.ctrl-row {
 		display: flex;
 		align-items: center;
-		gap: 0;
-		padding: 0 20px;
-		height: 54px;
+		gap: 8px;
 	}
 
 	.ctrl-group {
@@ -753,8 +787,9 @@
 		gap: 6px;
 	}
 
-	.ctrl-group + .ctrl-group {
-		margin-left: 24px;
+	.ctrl-group + .ctrl-group,
+	.ctrl-group + .axes-group {
+		margin-left: 20px;
 	}
 
 	.axes-group {
@@ -768,8 +803,8 @@
 
 	/* ── Buttons ──────────────────────────────────── */
 	.ctrl-btn {
-		height: 32px;
-		padding: 0 14px;
+		height: 30px;
+		padding: 0 12px;
 		border: 1px solid rgba(42, 42, 50, 0.14);
 		border-radius: 4px;
 		background: transparent;
@@ -782,7 +817,7 @@
 		transition: all 0.12s;
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 7px;
 		white-space: nowrap;
 	}
 
@@ -826,7 +861,6 @@
 		flex-shrink: 0;
 	}
 
-	/* ── File input ───────────────────────────────── */
 	.file-label {
 		border-style: dashed;
 		cursor: pointer;
@@ -855,7 +889,7 @@
 	}
 
 	.ax-sel {
-		padding: 4px 6px;
+		padding: 3px 6px;
 		border: 1px solid rgba(42, 42, 50, 0.1);
 		border-radius: 3px;
 		background: transparent;
@@ -869,12 +903,61 @@
 		transition: border-color 0.12s;
 	}
 
-	.ax-sel:hover {
-		border-color: rgba(42, 42, 50, 0.22);
+	.ax-sel:hover { border-color: rgba(42, 42, 50, 0.22); }
+	.ax-sel:focus { border-color: rgba(42, 42, 50, 0.3); }
+
+	/* ── Sliders ─────────────────────────────────── */
+	.slider-group {
+		display: flex;
+		align-items: center;
+		gap: 10px;
 	}
 
-	.ax-sel:focus {
-		border-color: rgba(42, 42, 50, 0.3);
+	.slider-group + .slider-group {
+		margin-left: 24px;
+	}
+
+	.slider-label {
+		font-size: 10px;
+		font-weight: 500;
+		letter-spacing: 2px;
+		color: rgba(42, 42, 50, 0.38);
+		white-space: nowrap;
+	}
+
+	.slider {
+		-webkit-appearance: none;
+		appearance: none;
+		width: 130px;
+		height: 2px;
+		background: rgba(42, 42, 50, 0.15);
+		border-radius: 1px;
+		outline: none;
+		cursor: pointer;
+	}
+
+	.slider::-webkit-slider-thumb {
+		-webkit-appearance: none;
+		width: 14px;
+		height: 14px;
+		border-radius: 50%;
+		background: #f2ede4;
+		border: 1.5px solid rgba(42, 42, 50, 0.35);
+		cursor: pointer;
+		transition: border-color 0.12s;
+	}
+
+	.slider::-webkit-slider-thumb:hover {
+		border-color: rgba(42, 42, 50, 0.55);
+	}
+
+	.slider::-moz-range-thumb {
+		width: 14px;
+		height: 14px;
+		border-radius: 50%;
+		background: #f2ede4;
+		border: 1.5px solid rgba(42, 42, 50, 0.35);
+		cursor: pointer;
 	}
 
 	/* ── Status elements ─────────────────────────── */

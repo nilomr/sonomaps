@@ -112,3 +112,62 @@ export const trailFragmentShader = /* glsl */ `
     gl_FragColor = vec4(color, alpha);
   }
 `;
+
+// ── Mel cloud shaders ─────────────────────────────────────
+
+export const melCloudVertexShader = /* glsl */ `
+  attribute float aFrameIndex;
+  attribute float aMelBand;
+  attribute float aEnergy;
+
+  uniform float uCurrentFrame;
+  uniform float uMaxFrames;
+  uniform float uPointSize;
+  uniform float uPixelRatio;
+
+  varying float vAlpha;
+
+  void main() {
+    float age = uCurrentFrame - aFrameIndex;
+
+    // Hide points outside the visible window
+    if (age >= uMaxFrames || aFrameIndex < 0.0) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      gl_PointSize = 0.0;
+      vAlpha = 0.0;
+      return;
+    }
+
+    // X = time (scrolling), Y = mel freq, Z = amplitude
+    float xNorm = 1.0 - age / uMaxFrames;
+    float x = (xNorm - 0.5) * 8.0;
+    float y = (aMelBand - 0.5) * 5.0;
+    float z = aEnergy * 2.5;
+
+    vec4 mvPosition = modelViewMatrix * vec4(x, y, z, 1.0);
+
+    float ageFade = 1.0 - smoothstep(0.65, 1.0, age / uMaxFrames);
+
+    gl_PointSize = uPointSize * uPixelRatio * ageFade
+                   * (100.0 / max(-mvPosition.z, 0.1));
+
+    vAlpha = (0.04 + aEnergy * 0.6) * ageFade;
+
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+export const melCloudFragmentShader = /* glsl */ `
+  varying float vAlpha;
+
+  void main() {
+    vec2 coord = gl_PointCoord - 0.5;
+    float r2 = dot(coord, coord);
+    if (r2 > 0.25) discard;
+
+    vec3 color = vec3(0.10, 0.10, 0.13);
+    float softEdge = 1.0 - smoothstep(0.15, 0.25, r2);
+
+    gl_FragColor = vec4(color, vAlpha * softEdge);
+  }
+`;
