@@ -10,12 +10,14 @@
 	// ── DOM refs ───────────────────────────────────────────
 	let pointCanvas: HTMLCanvasElement;
 	let spectroCanvas: HTMLCanvasElement;
-	let waveformCanvas: HTMLCanvasElement;
-	let waveCtx: CanvasRenderingContext2D | null = null;
+	let radarCanvas: HTMLCanvasElement;
+	let histCanvas: HTMLCanvasElement;
 
 	// ── Rendering objects (not reactive) ──────────────────
 	let pointCloud: PointCloudRenderer | null = null;
 	let spectrogram: SpectrogramRenderer | null = null;
+	let radarCtx: CanvasRenderingContext2D | null = null;
+	let histCtx: CanvasRenderingContext2D | null = null;
 
 	// ── Audio pipeline (not reactive) ─────────────────────
 	let audioSource: AudioSource | null = null;
@@ -173,57 +175,188 @@
 		pointCloud!.addPoints(pointData, 1);
 	}
 
-	// ── Waveform rendering ───────────────────────────────
-	function resizeWaveform(): void {
-		if (!waveformCanvas) return;
-		const w = Math.round(waveformCanvas.clientWidth);
-		const h = Math.round(waveformCanvas.clientHeight);
-		if (w > 0 && h > 0 && (waveformCanvas.width !== w || waveformCanvas.height !== h)) {
-			waveformCanvas.width = w;
-			waveformCanvas.height = h;
+	// ── Radar chart rendering ───────────────────────────
+	function resizeHiDPI(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
+		const dpr = window.devicePixelRatio || 1;
+		const w = Math.round(canvas.clientWidth);
+		const h = Math.round(canvas.clientHeight);
+		const pw = Math.round(w * dpr);
+		const ph = Math.round(h * dpr);
+		if (w > 0 && h > 0 && (canvas.width !== pw || canvas.height !== ph)) {
+			canvas.width = pw;
+			canvas.height = ph;
+			ctx.resetTransform();
+			ctx.scale(dpr, dpr);
 		}
 	}
 
-	function renderWaveform(): void {
-		if (!waveCtx || !waveformCanvas) return;
-		resizeWaveform();
-		const w = waveformCanvas.width;
-		const h = waveformCanvas.height;
+	function renderRadar(): void {
+		if (!radarCtx || !radarCanvas) return;
+		resizeHiDPI(radarCanvas, radarCtx);
+
+		const w = radarCanvas.clientWidth;
+		const h = radarCanvas.clientHeight;
 		if (w === 0 || h === 0) return;
 
-		waveCtx.fillStyle = '#f2ede4';
-		waveCtx.fillRect(0, 0, w, h);
+		radarCtx.clearRect(0, 0, w, h);
 
-		waveCtx.strokeStyle = 'rgba(42, 42, 50, 0.08)';
-		waveCtx.lineWidth = 1;
-		waveCtx.beginPath();
-		waveCtx.moveTo(0, h / 2);
-		waveCtx.lineTo(w, h / 2);
-		waveCtx.stroke();
+		const cx = w / 2;
+		const cy = h / 2;
+		const radius = Math.min(w, h) * 0.30;
 
-		if (!processing || !audioSource) return;
+		const features = [
+			{ label: 'Centroid', val: featCentroid, bar: barCentroid / 100 },
+			{ label: 'Energy', val: featRms, bar: barRms / 100 },
+			{ label: 'Crossings', val: featZcr, bar: barZcr / 100 },
+			{ label: 'Tonality', val: featFlat, bar: barFlat / 100 },
+			{ label: 'Spread', val: featBw, bar: barBw / 100 },
+			{ label: 'Rolloff', val: featRol, bar: barRol / 100 }
+		];
 
-		const data = audioSource.timeData;
-		if (!data || data.length === 0) return;
+		const n = features.length;
+		const step = (Math.PI * 2) / n;
+		const start = -Math.PI / 2;
 
-		waveCtx.strokeStyle = 'rgba(42, 42, 50, 0.45)';
-		waveCtx.lineWidth = 1.5;
-		waveCtx.beginPath();
-		const step = data.length / w;
-		const hHalf = h / 2;
-		for (let i = 0; i < w; i++) {
-			const idx = Math.floor(i * step);
-			const y = hHalf - data[idx] * hHalf * 0.85;
-			if (i === 0) waveCtx.moveTo(i, y);
-			else waveCtx.lineTo(i, y);
+		// Concentric rings
+		for (let ring = 1; ring <= 3; ring++) {
+			const r = radius * (ring / 3);
+			radarCtx.strokeStyle = ring === 3 ? 'rgba(42,42,50,0.14)' : 'rgba(42,42,50,0.06)';
+			radarCtx.lineWidth = 0.5;
+			radarCtx.beginPath();
+			for (let i = 0; i <= n; i++) {
+				const a = start + (i % n) * step;
+				const x = cx + Math.cos(a) * r;
+				const y = cy + Math.sin(a) * r;
+				if (i === 0) radarCtx.moveTo(x, y);
+				else radarCtx.lineTo(x, y);
+			}
+			radarCtx.closePath();
+			radarCtx.stroke();
 		}
-		waveCtx.stroke();
+
+		// Axis lines
+		radarCtx.strokeStyle = 'rgba(42,42,50,0.1)';
+		radarCtx.lineWidth = 0.5;
+		for (let i = 0; i < n; i++) {
+			const a = start + i * step;
+			radarCtx.beginPath();
+			radarCtx.moveTo(cx, cy);
+			radarCtx.lineTo(cx + Math.cos(a) * radius, cy + Math.sin(a) * radius);
+			radarCtx.stroke();
+		}
+
+		// Data polygon — fill
+		radarCtx.fillStyle = 'rgba(42,42,50,0.045)';
+		radarCtx.beginPath();
+		for (let i = 0; i <= n; i++) {
+			const idx = i % n;
+			const a = start + idx * step;
+			const r = radius * Math.max(0.03, features[idx].bar);
+			const x = cx + Math.cos(a) * r;
+			const y = cy + Math.sin(a) * r;
+			if (i === 0) radarCtx.moveTo(x, y);
+			else radarCtx.lineTo(x, y);
+		}
+		radarCtx.closePath();
+		radarCtx.fill();
+
+		// Data polygon — stroke
+		radarCtx.strokeStyle = 'rgba(42,42,50,0.38)';
+		radarCtx.lineWidth = 1.5;
+		radarCtx.beginPath();
+		for (let i = 0; i <= n; i++) {
+			const idx = i % n;
+			const a = start + idx * step;
+			const r = radius * Math.max(0.03, features[idx].bar);
+			const x = cx + Math.cos(a) * r;
+			const y = cy + Math.sin(a) * r;
+			if (i === 0) radarCtx.moveTo(x, y);
+			else radarCtx.lineTo(x, y);
+		}
+		radarCtx.closePath();
+		radarCtx.stroke();
+
+		// Vertex dots
+		for (let i = 0; i < n; i++) {
+			const a = start + i * step;
+			const r = radius * Math.max(0.03, features[i].bar);
+			const x = cx + Math.cos(a) * r;
+			const y = cy + Math.sin(a) * r;
+			radarCtx.fillStyle = 'rgba(42,42,50,0.5)';
+			radarCtx.beginPath();
+			radarCtx.arc(x, y, 2.5, 0, Math.PI * 2);
+			radarCtx.fill();
+		}
+
+		// Labels
+		for (let i = 0; i < n; i++) {
+			const a = start + i * step;
+			const lr = radius + 22;
+			const x = cx + Math.cos(a) * lr;
+			const y = cy + Math.sin(a) * lr;
+
+			// Feature name
+			radarCtx.fillStyle = 'rgba(42,42,50,0.38)';
+			radarCtx.font = '500 9px "JetBrains Mono"';
+			radarCtx.textAlign = 'center';
+			radarCtx.textBaseline = 'middle';
+			radarCtx.fillText(features[i].label, x, y - 6);
+
+			// Feature value
+			radarCtx.fillStyle = 'rgba(42,42,50,0.58)';
+			radarCtx.font = '400 10px "JetBrains Mono"';
+			radarCtx.fillText(features[i].val, x, y + 7);
+		}
+	}
+
+	// ── Frequency histogram rendering ───────────────────
+	function renderHistogram(): void {
+		if (!histCtx || !histCanvas) return;
+		resizeHiDPI(histCanvas, histCtx);
+
+		const w = histCanvas.clientWidth;
+		const h = histCanvas.clientHeight;
+		if (w === 0 || h === 0) return;
+
+		histCtx.fillStyle = '#f2ede4';
+		histCtx.fillRect(0, 0, w, h);
+
+		if (!processing || !melExtractor) return;
+
+		const energies = melExtractor.logMelEnergies;
+		if (!energies || energies.length === 0) return;
+
+		const n = energies.length;
+
+		// Dynamic range
+		let eMin = Infinity, eMax = -Infinity;
+		for (let i = 0; i < n; i++) {
+			if (energies[i] < eMin) eMin = energies[i];
+			if (energies[i] > eMax) eMax = energies[i];
+		}
+		const range = eMax - eMin || 1;
+
+		const gap = 1;
+		const barW = (w - gap * (n - 1)) / n;
+		const padTop = 32;
+		const padBottom = 4;
+		const drawH = h - padTop - padBottom;
+
+		for (let i = 0; i < n; i++) {
+			const norm = Math.max(0, (energies[i] - eMin) / range);
+			const barH = norm * drawH * 0.92;
+			const x = i * (barW + gap);
+			const y = h - padBottom - barH;
+			const alpha = 0.08 + norm * 0.5;
+			histCtx.fillStyle = `rgba(42,42,50,${alpha.toFixed(3)})`;
+			histCtx.fillRect(x, y, Math.max(1, barW), barH);
+		}
 	}
 
 	// ── Lifecycle ─────────────────────────────────────────
 	onMount(() => {
-		waveCtx = waveformCanvas.getContext('2d');
-		resizeWaveform();
+		radarCtx = radarCanvas.getContext('2d');
+		histCtx = histCanvas.getContext('2d');
 
 		pointCloud = new PointCloudRenderer(pointCanvas, {
 			maxPoints: MAX_POINTS,
@@ -236,7 +369,6 @@
 		const onResize = () => {
 			pointCloud?.resize();
 			spectrogram?.resize();
-			resizeWaveform();
 		};
 		window.addEventListener('resize', onResize);
 
@@ -245,7 +377,8 @@
 				spectrogram!.addColumn(melExtractor.logMelEnergies);
 			}
 
-			renderWaveform();
+			renderRadar();
+			renderHistogram();
 			pointCloud?.render();
 
 			featCounter++;
@@ -363,171 +496,108 @@
 </svelte:head>
 
 <main>
-	<!-- ─── Sidebar ─── -->
-	<aside class="sidebar">
-		<div class="brand-block">
-			<h1 class="brand">SONO<br/>MAPS</h1>
-			<div class="status-badge">
-				<span class="status-dot" class:active={isRunning}></span>
-				<span class="status-text">{status}</span>
-			</div>
+	<!-- ─── Embedding (top-left) ─── -->
+	<section class="panel embedding">
+		<canvas bind:this={pointCanvas}></canvas>
+		<span class="panel-label">EMBEDDING</span>
+
+		<div class="corner tl"></div>
+		<div class="corner tr"></div>
+		<div class="corner bl"></div>
+		<div class="corner br"></div>
+
+		<div class="axes-overlay">
+			<span class="ax-key">X</span> {getFeature(axisX).axisLabel}
+			<span class="ax-sep">/</span>
+			<span class="ax-key">Y</span> {getFeature(axisY).axisLabel}
+			<span class="ax-sep">/</span>
+			<span class="ax-key">Z</span> {getFeature(axisZ).axisLabel}
 		</div>
+	</section>
 
-		<div class="divider"></div>
+	<!-- ─── Analysis radar (top-right) ─── -->
+	<section class="panel analysis">
+		<canvas bind:this={radarCanvas} class="fill-canvas"></canvas>
+		<span class="panel-label">ANALYSIS</span>
+	</section>
 
-		<div class="sb-section">
-			<span class="sb-label">WAVEFORM</span>
-			<div class="waveform-wrap">
-				<canvas bind:this={waveformCanvas} class="waveform-canvas"></canvas>
-			</div>
+	<!-- ─── Spectrogram (bottom-left) ─── -->
+	<section class="panel spectrogram">
+		<canvas bind:this={spectroCanvas}></canvas>
+		<span class="panel-label">SPECTROGRAM</span>
+		<div class="spec-freq">
+			<span>HI</span>
+			<span>LO</span>
 		</div>
+	</section>
 
-		<div class="divider"></div>
+	<!-- ─── Frequency histogram (bottom-right) ─── -->
+	<section class="panel spectrum">
+		<canvas bind:this={histCanvas} class="fill-canvas"></canvas>
+		<span class="panel-label">SPECTRUM</span>
+	</section>
 
-		<div class="sb-section">
-			<span class="sb-label">FEATURES</span>
-			<div class="features">
-				<div class="feat">
-					<div class="feat-head">
-						<span class="feat-lbl">CENTROID</span>
-						<span class="feat-val">{featCentroid}</span>
-					</div>
-					<div class="feat-track"><div class="feat-fill" style="width:{barCentroid}%"></div></div>
-				</div>
-				<div class="feat">
-					<div class="feat-head">
-						<span class="feat-lbl">RMS</span>
-						<span class="feat-val">{featRms}</span>
-					</div>
-					<div class="feat-track"><div class="feat-fill" style="width:{barRms}%"></div></div>
-				</div>
-				<div class="feat">
-					<div class="feat-head">
-						<span class="feat-lbl">ZERO CROSS</span>
-						<span class="feat-val">{featZcr}</span>
-					</div>
-					<div class="feat-track"><div class="feat-fill" style="width:{barZcr}%"></div></div>
-				</div>
-				<div class="feat">
-					<div class="feat-head">
-						<span class="feat-lbl">FLATNESS</span>
-						<span class="feat-val">{featFlat}</span>
-					</div>
-					<div class="feat-track"><div class="feat-fill" style="width:{barFlat}%"></div></div>
-				</div>
-				<div class="feat">
-					<div class="feat-head">
-						<span class="feat-lbl">BANDWIDTH</span>
-						<span class="feat-val">{featBw}</span>
-					</div>
-					<div class="feat-track"><div class="feat-fill" style="width:{barBw}%"></div></div>
-				</div>
-				<div class="feat">
-					<div class="feat-head">
-						<span class="feat-lbl">ROLLOFF</span>
-						<span class="feat-val">{featRol}</span>
-					</div>
-					<div class="feat-track"><div class="feat-fill" style="width:{barRol}%"></div></div>
-				</div>
-			</div>
-		</div>
-
-		<div class="divider"></div>
-
-		<div class="sb-section controls-section">
-			<button class="play-btn" class:active={isRunning} onclick={toggle}
+	<!-- ─── Controls bar (bottom full-width) ─── -->
+	<section class="panel controls-bar">
+		<div class="ctrl-group">
+			<button class="ctrl-btn play" class:active={isRunning} onclick={toggle}
 				aria-label={isRunning ? 'Stop' : 'Start'}>
 				{#if isRunning}
 					<span class="icon-stop"></span>
-					<span class="play-label">STOP</span>
 				{:else}
 					<span class="icon-play"></span>
-					<span class="play-label">START</span>
 				{/if}
+				<span>{isRunning ? 'STOP' : 'START'}</span>
 			</button>
 
-			<div class="ctl-group">
-				<span class="ctl-label">INPUT</span>
-				<div class="toggle-row">
-					<button class="toggle-btn" class:active={inputMode === 'mic'} disabled={isRunning}
-						onclick={() => (inputMode = 'mic')}>MIC</button>
-					<button class="toggle-btn" class:active={inputMode === 'file'} disabled={isRunning}
-						onclick={() => (inputMode = 'file')}>FILE</button>
-				</div>
-			</div>
+			<button class="ctrl-btn" class:active={inputMode === 'mic'} disabled={isRunning}
+				onclick={() => (inputMode = 'mic')}>MIC</button>
+			<button class="ctrl-btn" class:active={inputMode === 'file'} disabled={isRunning}
+				onclick={() => (inputMode = 'file')}>FILE</button>
 
 			{#if inputMode === 'file'}
-				<label class="file-wrap">
-					<span class="file-name" class:has-file={!!selectedFile}>
-						{selectedFile ? selectedFile.name.slice(0, 18).toUpperCase() : 'CHOOSE FILE'}
-					</span>
-					<input type="file" accept="audio/*" onchange={onFileChange} disabled={isRunning}
-						class="file-input" />
+				<label class="ctrl-btn file-label">
+					<span>{selectedFile ? selectedFile.name.slice(0, 14).toUpperCase() : 'CHOOSE FILE'}</span>
+					<input type="file" accept="audio/*" onchange={onFileChange}
+						disabled={isRunning} class="file-hidden" />
 				</label>
 			{/if}
+		</div>
 
-			<div class="ctl-group">
-				<span class="ctl-label">AXES</span>
-				<div class="axis-row">
-					<span class="axis-tag">X</span>
-					<select class="axis-select" bind:value={axisX} onchange={onAxesChange}>
-						{#each FEATURES as f}
-							<option value={f.id}>{f.label}</option>
-						{/each}
-					</select>
-				</div>
-				<div class="axis-row">
-					<span class="axis-tag">Y</span>
-					<select class="axis-select" bind:value={axisY} onchange={onAxesChange}>
-						{#each FEATURES as f}
-							<option value={f.id}>{f.label}</option>
-						{/each}
-					</select>
-				</div>
-				<div class="axis-row">
-					<span class="axis-tag">Z</span>
-					<select class="axis-select" bind:value={axisZ} onchange={onAxesChange}>
-						{#each FEATURES as f}
-							<option value={f.id}>{f.label}</option>
-						{/each}
-					</select>
-				</div>
+		<div class="ctrl-group axes-group">
+			<div class="axis-inline">
+				<span class="ax-tag">X</span>
+				<select class="ax-sel" bind:value={axisX} onchange={onAxesChange}>
+					{#each FEATURES as f}
+						<option value={f.id}>{f.label}</option>
+					{/each}
+				</select>
+			</div>
+			<div class="axis-inline">
+				<span class="ax-tag">Y</span>
+				<select class="ax-sel" bind:value={axisY} onchange={onAxesChange}>
+					{#each FEATURES as f}
+						<option value={f.id}>{f.label}</option>
+					{/each}
+				</select>
+			</div>
+			<div class="axis-inline">
+				<span class="ax-tag">Z</span>
+				<select class="ax-sel" bind:value={axisZ} onchange={onAxesChange}>
+					{#each FEATURES as f}
+						<option value={f.id}>{f.label}</option>
+					{/each}
+				</select>
 			</div>
 		</div>
 
-		<div class="sidebar-footer">
-			<span class="fps-display">{fps} <span class="fps-unit">FPS</span></span>
+		<div class="ctrl-group status-group">
+			<span class="brand-micro">SONOMAPS</span>
+			<span class="status-dot" class:active={isRunning}></span>
+			<span class="status-text">{status}</span>
+			<span class="fps-val">{fps} <span class="fps-unit">FPS</span></span>
 		</div>
-	</aside>
-
-	<!-- ─── Main visualization ─── -->
-	<div class="viz-area">
-		<section class="embedding-view">
-			<canvas bind:this={pointCanvas}></canvas>
-
-			<div class="corner tl"></div>
-			<div class="corner tr"></div>
-			<div class="corner bl"></div>
-			<div class="corner br"></div>
-
-			<div class="axes-label">
-				<span class="axis-key">X</span> {getFeature(axisX).axisLabel}
-				<span class="axes-sep">/</span>
-				<span class="axis-key">Y</span> {getFeature(axisY).axisLabel}
-				<span class="axes-sep">/</span>
-				<span class="axis-key">Z</span> {getFeature(axisZ).axisLabel}
-			</div>
-		</section>
-
-		<section class="spectrogram-view">
-			<canvas bind:this={spectroCanvas}></canvas>
-			<span class="spec-label">MEL SPECTROGRAM</span>
-			<div class="spec-freq">
-				<span>HI</span>
-				<span>LO</span>
-			</div>
-		</section>
-	</div>
+	</section>
 </main>
 
 <style>
@@ -542,283 +612,227 @@
 		-webkit-font-smoothing: antialiased;
 	}
 
+	/* ── Grid layout ─────────────────────────────── */
 	main {
 		width: 100vw;
 		height: 100vh;
-		display: flex;
-		flex-direction: row;
+		display: grid;
+		grid-template-columns: 1.3fr 1fr;
+		grid-template-rows: 1fr 200px auto;
+		grid-template-areas:
+			"embedding analysis"
+			"spectrogram spectrum"
+			"controls controls";
+		gap: 1px;
+		background: rgba(42, 42, 50, 0.12);
 	}
 
-	/* ── Sidebar ──────────────────────────────────── */
-	.sidebar {
-		width: 260px;
-		height: 100vh;
+	/* ── Panel base ──────────────────────────────── */
+	.panel {
+		position: relative;
+		background: #f2ede4;
+		overflow: hidden;
+	}
+
+	.panel-label {
+		position: absolute;
+		top: 14px;
+		left: 18px;
+		font-size: 10px;
+		font-weight: 500;
+		letter-spacing: 2.5px;
+		color: rgba(42, 42, 50, 0.32);
+		pointer-events: none;
+		z-index: 2;
+	}
+
+	/* ── Embedding panel ─────────────────────────── */
+	.embedding {
+		grid-area: embedding;
+	}
+
+	.embedding canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.corner {
+		position: absolute;
+		width: 24px;
+		height: 24px;
+		pointer-events: none;
+		z-index: 1;
+	}
+	.corner.tl { top: 12px; left: 12px; border-left: 1px solid rgba(42,42,50,0.18); border-top: 1px solid rgba(42,42,50,0.18); }
+	.corner.tr { top: 12px; right: 12px; border-right: 1px solid rgba(42,42,50,0.18); border-top: 1px solid rgba(42,42,50,0.18); }
+	.corner.bl { bottom: 12px; left: 12px; border-left: 1px solid rgba(42,42,50,0.18); border-bottom: 1px solid rgba(42,42,50,0.18); }
+	.corner.br { bottom: 12px; right: 12px; border-right: 1px solid rgba(42,42,50,0.18); border-bottom: 1px solid rgba(42,42,50,0.18); }
+
+	.axes-overlay {
+		position: absolute;
+		bottom: 20px;
+		left: 44px;
+		font-size: 10px;
+		font-weight: 400;
+		letter-spacing: 1.5px;
+		color: rgba(42, 42, 50, 0.35);
+		pointer-events: none;
+		z-index: 2;
+	}
+
+	.ax-key {
+		font-weight: 600;
+		color: rgba(42, 42, 50, 0.55);
+	}
+
+	.ax-sep {
+		margin: 0 5px;
+		font-weight: 300;
+		color: rgba(42, 42, 50, 0.18);
+	}
+
+	/* ── Analysis panel ──────────────────────────── */
+	.analysis {
+		grid-area: analysis;
+	}
+
+	.fill-canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	/* ── Spectrogram panel ────────────────────────── */
+	.spectrogram {
+		grid-area: spectrogram;
+	}
+
+	.spectrogram canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.spec-freq {
+		position: absolute;
+		right: 14px;
+		top: 12px;
+		bottom: 8px;
 		display: flex;
 		flex-direction: column;
-		border-right: 1px solid rgba(42, 42, 50, 0.1);
-		flex-shrink: 0;
-	}
-
-	.brand-block {
-		padding: 24px 24px 20px;
-		display: flex;
-		align-items: flex-start;
 		justify-content: space-between;
-		flex-shrink: 0;
+		pointer-events: none;
 	}
 
-	.brand {
-		margin: 0;
-		font-size: 20px;
-		font-weight: 600;
-		letter-spacing: 5px;
-		line-height: 1.2;
-		color: rgba(42, 42, 50, 0.72);
+	.spec-freq span {
+		font-size: 9px;
+		font-weight: 400;
+		letter-spacing: 1px;
+		color: rgba(42, 42, 50, 0.26);
 	}
 
-	.status-badge {
+	/* ── Spectrum / histogram panel ──────────────── */
+	.spectrum {
+		grid-area: spectrum;
+	}
+
+	/* ── Controls bar ────────────────────────────── */
+	.controls-bar {
+		grid-area: controls;
+		display: flex;
+		align-items: center;
+		gap: 0;
+		padding: 0 20px;
+		height: 54px;
+	}
+
+	.ctrl-group {
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		margin-top: 5px;
 	}
 
-	.status-dot {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: rgba(42, 42, 50, 0.2);
-		flex-shrink: 0;
-		transition: background 0.2s;
-	}
-	.status-dot.active {
-		background: rgba(160, 50, 50, 0.65);
+	.ctrl-group + .ctrl-group {
+		margin-left: 24px;
 	}
 
-	.status-text {
-		font-size: 10px;
-		font-weight: 400;
-		letter-spacing: 1.5px;
+	.axes-group {
+		gap: 10px;
+	}
+
+	.status-group {
+		margin-left: auto;
+		gap: 8px;
+	}
+
+	/* ── Buttons ──────────────────────────────────── */
+	.ctrl-btn {
+		height: 32px;
+		padding: 0 14px;
+		border: 1px solid rgba(42, 42, 50, 0.14);
+		border-radius: 4px;
+		background: transparent;
 		color: rgba(42, 42, 50, 0.45);
-	}
-
-	.divider {
-		height: 1px;
-		margin: 0 24px;
-		background: rgba(42, 42, 50, 0.08);
-		flex-shrink: 0;
-	}
-
-	/* ── Sidebar sections ─────────────────────────── */
-	.sb-section {
-		padding: 18px 24px;
-		flex-shrink: 0;
-	}
-
-	.sb-label {
-		display: block;
+		font-family: inherit;
 		font-size: 10px;
 		font-weight: 500;
 		letter-spacing: 2px;
-		color: rgba(42, 42, 50, 0.38);
-		margin-bottom: 12px;
-	}
-
-	/* ── Waveform ─────────────────────────────────── */
-	.waveform-wrap {
-		height: 44px;
-		border-radius: 4px;
-		overflow: hidden;
-		border: 1px solid rgba(42, 42, 50, 0.06);
-	}
-
-	.waveform-canvas {
-		width: 100%;
-		height: 100%;
-		display: block;
-	}
-
-	/* ── Features ─────────────────────────────────── */
-	.features {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.feat {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.feat-head {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-	}
-
-	.feat-lbl {
-		font-size: 10px;
-		font-weight: 500;
-		letter-spacing: 1.5px;
-		color: rgba(42, 42, 50, 0.5);
-	}
-
-	.feat-val {
-		font-size: 12px;
-		font-weight: 400;
-		color: rgba(42, 42, 50, 0.75);
-		font-variant-numeric: tabular-nums;
-	}
-
-	.feat-track {
-		width: 100%;
-		height: 3px;
-		background: rgba(42, 42, 50, 0.07);
-		border-radius: 2px;
-		overflow: hidden;
-	}
-
-	.feat-fill {
-		height: 100%;
-		background: rgba(42, 42, 50, 0.45);
-		border-radius: 2px;
-		transition: width 0.1s ease-out;
-	}
-
-	/* ── Controls ─────────────────────────────────── */
-	.controls-section {
-		display: flex;
-		flex-direction: column;
-		gap: 14px;
-	}
-
-	.play-btn {
-		width: 100%;
-		height: 40px;
-		border: 1px solid rgba(42, 42, 50, 0.18);
-		border-radius: 6px;
-		background: transparent;
 		cursor: pointer;
+		transition: all 0.12s;
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		gap: 10px;
-		transition: all 0.15s;
-		font-family: inherit;
-	}
-	.play-btn:hover {
-		border-color: rgba(42, 42, 50, 0.35);
-		background: rgba(42, 42, 50, 0.03);
-	}
-	.play-btn.active {
-		border-color: rgba(160, 50, 50, 0.35);
-		background: rgba(160, 50, 50, 0.04);
+		gap: 8px;
+		white-space: nowrap;
 	}
 
-	.play-label {
-		font-size: 11px;
-		font-weight: 500;
-		letter-spacing: 2.5px;
-		color: rgba(42, 42, 50, 0.65);
+	.ctrl-btn:hover {
+		border-color: rgba(42, 42, 50, 0.3);
+		color: rgba(42, 42, 50, 0.7);
+		background: rgba(42, 42, 50, 0.025);
 	}
-	.play-btn.active .play-label {
+
+	.ctrl-btn.active {
+		border-color: rgba(42, 42, 50, 0.22);
+		color: rgba(42, 42, 50, 0.75);
+		background: rgba(42, 42, 50, 0.04);
+	}
+
+	.ctrl-btn:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
+	}
+
+	.ctrl-btn.play.active {
+		border-color: rgba(160, 50, 50, 0.3);
 		color: rgba(160, 50, 50, 0.65);
+		background: rgba(160, 50, 50, 0.03);
 	}
 
 	.icon-play {
 		width: 0;
 		height: 0;
 		border-style: solid;
-		border-width: 6px 0 6px 10px;
-		border-color: transparent transparent transparent rgba(42, 42, 50, 0.55);
+		border-width: 5px 0 5px 8px;
+		border-color: transparent transparent transparent rgba(42, 42, 50, 0.5);
+		flex-shrink: 0;
 	}
 
 	.icon-stop {
-		width: 10px;
-		height: 10px;
-		background: rgba(160, 50, 50, 0.55);
-		border-radius: 2px;
+		width: 9px;
+		height: 9px;
+		background: rgba(160, 50, 50, 0.5);
+		border-radius: 1.5px;
+		flex-shrink: 0;
 	}
 
-	.ctl-group {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.ctl-label {
-		font-size: 10px;
-		font-weight: 500;
-		letter-spacing: 1.5px;
-		color: rgba(42, 42, 50, 0.42);
-	}
-
-	.toggle-row {
-		display: flex;
-		gap: 0;
-	}
-
-	.toggle-btn {
-		flex: 1;
-		padding: 7px 0;
-		border: 1px solid rgba(42, 42, 50, 0.12);
-		background: transparent;
-		color: rgba(42, 42, 50, 0.38);
-		font-family: inherit;
-		font-size: 11px;
-		font-weight: 400;
-		letter-spacing: 1.5px;
+	/* ── File input ───────────────────────────────── */
+	.file-label {
+		border-style: dashed;
 		cursor: pointer;
-		transition: all 0.12s;
-	}
-	.toggle-btn:first-child {
-		border-radius: 4px 0 0 4px;
-		border-right: none;
-	}
-	.toggle-btn:last-child {
-		border-radius: 0 4px 4px 0;
-	}
-	.toggle-btn:hover {
-		color: rgba(42, 42, 50, 0.6);
-		background: rgba(42, 42, 50, 0.03);
-	}
-	.toggle-btn.active {
-		color: rgba(42, 42, 50, 0.8);
-		background: rgba(42, 42, 50, 0.06);
-		border-color: rgba(42, 42, 50, 0.18);
-	}
-	.toggle-btn:disabled {
-		opacity: 0.35;
-		cursor: not-allowed;
 	}
 
-	.file-wrap {
-		cursor: pointer;
-		display: block;
-	}
-	.file-name {
-		display: block;
-		padding: 8px 12px;
-		border: 1px dashed rgba(42, 42, 50, 0.18);
-		border-radius: 4px;
-		font-family: inherit;
-		font-size: 10px;
-		font-weight: 400;
-		letter-spacing: 1px;
-		color: rgba(42, 42, 50, 0.42);
-		text-align: center;
-		transition: all 0.12s;
-	}
-	.file-name:hover {
-		border-color: rgba(42, 42, 50, 0.35);
-		color: rgba(42, 42, 50, 0.65);
-	}
-	.file-name.has-file {
-		border-style: solid;
-		color: rgba(42, 42, 50, 0.7);
-	}
-	.file-input {
+	.file-hidden {
 		position: absolute;
 		width: 0;
 		height: 0;
@@ -827,159 +841,82 @@
 	}
 
 	/* ── Axis selectors ──────────────────────────── */
-	.axis-row {
+	.axis-inline {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-	}
-	.axis-row + .axis-row {
-		margin-top: 4px;
+		gap: 5px;
 	}
 
-	.axis-tag {
+	.ax-tag {
 		font-size: 10px;
 		font-weight: 600;
 		letter-spacing: 1px;
-		color: rgba(42, 42, 50, 0.55);
-		width: 14px;
-		flex-shrink: 0;
+		color: rgba(42, 42, 50, 0.5);
 	}
 
-	.axis-select {
-		flex: 1;
-		padding: 5px 8px;
-		border: 1px solid rgba(42, 42, 50, 0.12);
+	.ax-sel {
+		padding: 4px 6px;
+		border: 1px solid rgba(42, 42, 50, 0.1);
 		border-radius: 3px;
 		background: transparent;
-		color: rgba(42, 42, 50, 0.7);
+		color: rgba(42, 42, 50, 0.6);
 		font-family: inherit;
 		font-size: 10px;
 		font-weight: 400;
-		letter-spacing: 0.5px;
+		letter-spacing: 0.3px;
 		cursor: pointer;
 		outline: none;
+		transition: border-color 0.12s;
 	}
-	.axis-select:hover {
-		border-color: rgba(42, 42, 50, 0.25);
+
+	.ax-sel:hover {
+		border-color: rgba(42, 42, 50, 0.22);
 	}
-	.axis-select:focus {
+
+	.ax-sel:focus {
 		border-color: rgba(42, 42, 50, 0.3);
 	}
 
-	/* ── Sidebar footer ───────────────────────────── */
-	.sidebar-footer {
-		margin-top: auto;
-		padding: 16px 24px;
-		border-top: 1px solid rgba(42, 42, 50, 0.06);
+	/* ── Status elements ─────────────────────────── */
+	.brand-micro {
+		font-size: 10px;
+		font-weight: 600;
+		letter-spacing: 3px;
+		color: rgba(42, 42, 50, 0.3);
+	}
+
+	.status-dot {
+		width: 5px;
+		height: 5px;
+		border-radius: 50%;
+		background: rgba(42, 42, 50, 0.18);
+		transition: background 0.2s;
 		flex-shrink: 0;
 	}
 
-	.fps-display {
-		font-size: 12px;
+	.status-dot.active {
+		background: rgba(160, 50, 50, 0.6);
+	}
+
+	.status-text {
+		font-size: 10px;
 		font-weight: 400;
-		color: rgba(42, 42, 50, 0.5);
+		letter-spacing: 1.5px;
+		color: rgba(42, 42, 50, 0.38);
+	}
+
+	.fps-val {
+		font-size: 11px;
+		font-weight: 400;
+		color: rgba(42, 42, 50, 0.4);
 		font-variant-numeric: tabular-nums;
+		margin-left: 4px;
 	}
 
 	.fps-unit {
 		font-size: 9px;
 		font-weight: 300;
 		letter-spacing: 1px;
-		color: rgba(42, 42, 50, 0.3);
-	}
-
-	/* ── Main visualization area ──────────────────── */
-	.viz-area {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		min-width: 0;
-	}
-
-	/* ── Embedding view ──────────────────────────── */
-	.embedding-view {
-		flex: 1;
-		position: relative;
-		min-height: 0;
-	}
-
-	.embedding-view canvas {
-		width: 100%;
-		height: 100%;
-		display: block;
-	}
-
-	.corner {
-		position: absolute;
-		width: 28px;
-		height: 28px;
-		pointer-events: none;
-		z-index: 1;
-	}
-	.corner.tl { top: 16px; left: 16px; border-left: 1.5px solid rgba(42,42,50,0.15); border-top: 1.5px solid rgba(42,42,50,0.15); }
-	.corner.tr { top: 16px; right: 16px; border-right: 1.5px solid rgba(42,42,50,0.15); border-top: 1.5px solid rgba(42,42,50,0.15); }
-	.corner.bl { bottom: 16px; left: 16px; border-left: 1.5px solid rgba(42,42,50,0.15); border-bottom: 1.5px solid rgba(42,42,50,0.15); }
-	.corner.br { bottom: 16px; right: 16px; border-right: 1.5px solid rgba(42,42,50,0.15); border-bottom: 1.5px solid rgba(42,42,50,0.15); }
-
-	.axes-label {
-		position: absolute;
-		bottom: 24px;
-		left: 52px;
-		font-size: 11px;
-		font-weight: 400;
-		letter-spacing: 1.5px;
-		color: rgba(42, 42, 50, 0.38);
-		pointer-events: none;
-	}
-	.axis-key {
-		font-weight: 600;
-		color: rgba(42, 42, 50, 0.6);
-	}
-	.axes-sep {
-		margin: 0 6px;
-		font-weight: 300;
-		color: rgba(42, 42, 50, 0.2);
-	}
-
-	/* ── Spectrogram ─────────────────────────────── */
-	.spectrogram-view {
-		height: 150px;
-		position: relative;
-		border-top: 1px solid rgba(42, 42, 50, 0.08);
-		flex-shrink: 0;
-	}
-
-	.spectrogram-view canvas {
-		width: 100%;
-		height: 100%;
-		display: block;
-	}
-
-	.spec-label {
-		position: absolute;
-		top: 12px;
-		left: 20px;
-		font-size: 10px;
-		font-weight: 500;
-		letter-spacing: 2px;
-		color: rgba(42, 42, 50, 0.32);
-		pointer-events: none;
-	}
-
-	.spec-freq {
-		position: absolute;
-		right: 16px;
-		top: 12px;
-		bottom: 8px;
-		display: flex;
-		flex-direction: column;
-		justify-content: space-between;
-		pointer-events: none;
-	}
-	.spec-freq span {
-		font-size: 9px;
-		font-weight: 400;
-		letter-spacing: 1px;
-		color: rgba(42, 42, 50, 0.28);
+		color: rgba(42, 42, 50, 0.25);
 	}
 </style>
