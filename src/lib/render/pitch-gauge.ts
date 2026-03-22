@@ -1,7 +1,7 @@
 /**
- * Arc pitch gauge — logarithmic frequency display with trail.
+ * Arc peak-frequency gauge — logarithmic frequency display with trail.
  *
- * Renders a precision instrument arc showing detected pitch
+ * Renders a precision instrument arc showing detected peak frequency
  * on a log-frequency scale with octave markers, a persistence
  * trail of recent detections, and Hz/note readout at center.
  */

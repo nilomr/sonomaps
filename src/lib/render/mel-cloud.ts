@@ -61,7 +61,7 @@ export class MelCloudRenderer {
 		// ── Scene & camera ─────────────────────────────────
 		this.scene = new THREE.Scene();
 		this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
-		this.camera.position.set(5, 3, 9);
+		this.camera.position.set(7, 5, 5);
 
 		this.controls = new OrbitControls(this.camera, canvas);
 		this.controls.enableDamping = true;

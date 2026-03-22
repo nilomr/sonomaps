@@ -92,7 +92,7 @@ export class PointCloudRenderer {
 		this.scene = new THREE.Scene();
 
 		this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
-		this.camera.position.set(0, 0, 12);
+		this.camera.position.set(8, 5, 7);
 
 		const canvas = this.renderer.domElement;
 		this.controls = new OrbitControls(this.camera, canvas);
@@ -329,7 +329,7 @@ export class PointCloudRenderer {
 		const maxDim = Math.max(dx, dy, dz, 2);
 
 		const fovRad = this.camera.fov * Math.PI / 180;
-		const desiredDist = Math.max(6, maxDim / (2 * Math.tan(fovRad / 2)) * 2.5);
+		const desiredDist = Math.max(4, maxDim / (2 * Math.tan(fovRad / 2)) * 1.6);
 
 		const lerp = 0.018;
 

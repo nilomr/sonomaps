@@ -37,11 +37,13 @@ export class AudioSource {
 	async startMic(): Promise<void> {
 		await this.initContext();
 		// Disable all browser audio processing to get raw mic signal.
+		// Use simple boolean form (some Chrome versions handle { exact: false } oddly).
 		this.stream = await navigator.mediaDevices.getUserMedia({
 			audio: {
-				echoCancellation: { exact: false },
-				noiseSuppression: { exact: false },
-				autoGainControl: { exact: false },
+				echoCancellation: false,
+				noiseSuppression: false,
+				autoGainControl: false,
+				// Chrome / WebRTC-specific flags
 				voiceIsolation: false,
 				googEchoCancellation: false,
 				googAutoGainControl: false,
@@ -49,6 +51,40 @@ export class AudioSource {
 				googHighpassFilter: false
 			} as MediaTrackConstraints
 		});
+
+		// Re-apply constraints after stream creation (belt-and-suspenders)
+		// and log what Chrome actually gave us for diagnostics.
+		const track = this.stream.getAudioTracks()[0];
+		if (track) {
+			try {
+				await track.applyConstraints({
+					echoCancellation: false,
+					noiseSuppression: false,
+					autoGainControl: false
+				});
+			} catch { /* not all browsers support post-hoc applyConstraints */ }
+
+			const s = track.getSettings();
+			console.log('[SonoMaps] Mic track settings:', {
+				echoCancellation: s.echoCancellation,
+				noiseSuppression: s.noiseSuppression,
+				autoGainControl: s.autoGainControl,
+				sampleRate: s.sampleRate,
+				channelCount: s.channelCount,
+				deviceId: s.deviceId
+			});
+
+			// Warn if Chrome ignored our constraints
+			if (s.echoCancellation || s.noiseSuppression || s.autoGainControl) {
+				console.warn(
+					'[SonoMaps] Browser audio processing is still ON despite requesting it off. ' +
+					'This usually means the OS or audio driver is forcing voice filtering. ' +
+					'Try: (1) Disable Waves MaxxAudio / Realtek voice enhancement in system settings, ' +
+					'(2) Use an external USB mic, (3) Try a different browser.'
+				);
+			}
+		}
+
 		this.sourceNode = this.ctx!.createMediaStreamSource(this.stream);
 		this.sourceNode.connect(this.volumeGain!);
 		this.volumeGain!.connect(this.analyser!);

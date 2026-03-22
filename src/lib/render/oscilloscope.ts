@@ -58,7 +58,7 @@ export class OscilloscopeRenderer {
 			const a = Math.abs(timeData[i]);
 			if (a > maxAmp) maxAmp = a;
 		}
-		const target = maxAmp > 0.002 ? Math.min(0.8 / maxAmp, 20) : this.ampScale;
+		const target = maxAmp > 0.002 ? Math.min(0.5 / maxAmp, 5) : this.ampScale;
 		// Asymmetric: fast grow, slow shrink
 		const rate = target > this.ampScale ? 0.25 : 0.04;
 		this.ampScale += (target - this.ampScale) * rate;

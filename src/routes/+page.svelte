@@ -395,7 +395,7 @@
 		window.addEventListener('resize', onResize);
 
 		function loop() {
-			if (processing && melExtractor && isAboveGate) {
+			if (processing && melExtractor) {
 				melCloud!.addFrame(melExtractor.logMelEnergies);
 				spectrogram?.addColumn(melExtractor.logMelEnergies);
 			}
@@ -405,7 +405,7 @@
 			renderRadar();
 
 			// Oscilloscope + pitch gauge
-			if (processing && audioSource && isAboveGate) {
+			if (processing && audioSource) {
 				scope?.draw(audioSource.timeData);
 				pitchGauge?.draw(melExtractor?.peakFreq ?? 0);
 			} else {
@@ -561,20 +561,12 @@
 			<canvas bind:this={spectroCanvas}></canvas>
 		</div>
 		<span class="panel-label">MEL SPECTROGRAM</span>
-		<div class="corner tl"></div>
-		<div class="corner tr"></div>
-		<div class="corner bl"></div>
-		<div class="corner br"></div>
 	</section>
 
 	<!-- ─── Trajectory (center) ─── -->
 	<section class="panel trajectory">
 		<canvas bind:this={pointCanvas}></canvas>
 		<span class="panel-label">TRAJECTORY</span>
-		<div class="corner tl"></div>
-		<div class="corner tr"></div>
-		<div class="corner bl"></div>
-		<div class="corner br"></div>
 		<div class="axes-overlay">
 			<span class="ax-key">X</span> {getFeature(axisX).axisLabel}
 			<span class="ax-sep">/</span>
@@ -591,7 +583,7 @@
 		</div>
 		<div class="analysis-pitch">
 			<canvas bind:this={pitchCanvas}></canvas>
-			<span class="panel-label sub">PITCH</span>
+			<span class="panel-label sub">PEAK FREQ</span>
 		</div>
 		<div class="analysis-scope">
 			<canvas bind:this={scopeCanvas}></canvas>
@@ -608,10 +600,7 @@
 				<span class="brand-top">SONO</span>
 				<span class="brand-bottom">MAPS</span>
 			</div>
-			<div class="brand-status">
-				<span class="status-dot" class:active={isRunning}></span>
-				<span class="status-text">{status}</span>
-			</div>
+			<span class="status-badge" class:active={isRunning}>{status}</span>
 		</div>
 
 		<div class="ctrl-sep"></div>
@@ -791,19 +780,6 @@
 		display: block;
 	}
 
-	/* ── Corner marks ────────────────────────────── */
-	.corner {
-		position: absolute;
-		width: 22px;
-		height: 22px;
-		pointer-events: none;
-		z-index: 1;
-	}
-	.corner.tl { top: 10px; left: 10px; border-left: 1px solid rgba(42,42,50,0.16); border-top: 1px solid rgba(42,42,50,0.16); }
-	.corner.tr { top: 10px; right: 10px; border-right: 1px solid rgba(42,42,50,0.16); border-top: 1px solid rgba(42,42,50,0.16); }
-	.corner.bl { bottom: 10px; left: 10px; border-left: 1px solid rgba(42,42,50,0.16); border-bottom: 1px solid rgba(42,42,50,0.16); }
-	.corner.br { bottom: 10px; right: 10px; border-right: 1px solid rgba(42,42,50,0.16); border-bottom: 1px solid rgba(42,42,50,0.16); }
-
 	/* ── Axes overlay ────────────────────────────── */
 	.axes-overlay {
 		position: absolute;
@@ -906,13 +882,6 @@
 		font-weight: 300;
 		letter-spacing: 6px;
 		color: rgba(42, 42, 50, 0.28);
-	}
-
-	.brand-status {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 4px;
 	}
 
 	/* ── Separator ───────────────────────────────── */
@@ -1179,24 +1148,26 @@
 		margin-top: 2px;
 	}
 
-	/* ── Status elements ─────────────────────────── */
-	.status-dot {
-		width: 5px;
-		height: 5px;
-		border-radius: 50%;
-		background: rgba(42, 42, 50, 0.18);
-		transition: background 0.2s;
-		flex-shrink: 0;
-	}
-
-	.status-dot.active {
-		background: rgba(160, 50, 50, 0.6);
-	}
-
-	.status-text {
-		font-size: 10px;
-		font-weight: 400;
-		letter-spacing: 1.5px;
+	/* ── Status badge ────────────────────────────── */
+	.status-badge {
+		display: inline-block;
+		width: 72px;
+		padding: 4px 0;
+		text-align: center;
+		font-size: 9px;
+		font-weight: 500;
+		letter-spacing: 2px;
 		color: rgba(42, 42, 50, 0.35);
+		border: 1px solid rgba(42, 42, 50, 0.12);
+		border-radius: 3px;
+		background: transparent;
+		transition: color 0.2s, border-color 0.2s;
+		flex-shrink: 0;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.status-badge.active {
+		color: rgba(160, 50, 50, 0.7);
+		border-color: rgba(160, 50, 50, 0.25);
 	}
 </style>
