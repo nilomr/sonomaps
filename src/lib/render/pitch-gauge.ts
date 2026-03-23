@@ -57,8 +57,8 @@ export class PitchGaugeRenderer {
 		ctx.fillRect(0, 0, w, h);
 
 		const cx = w / 2;
-		const cy = h * 0.58;
-		const r = Math.min(w * 0.41, h * 0.37);
+		const cy = h * 0.565;
+		const r = Math.min(w * 0.45, h * 0.41);
 
 		// Decay all bins
 		for (let i = 0; i < NUM_BINS; i++) {
@@ -138,7 +138,7 @@ export class PitchGaugeRenderer {
 			ctx.stroke();
 
 			ctx.fillStyle = 'rgba(42, 42, 50, 0.2)';
-			ctx.font = '500 8px "JetBrains Mono"';
+			ctx.font = '500 9px "JetBrains Mono"';
 			ctx.textAlign = 'center';
 			ctx.textBaseline = 'middle';
 			ctx.fillText(oct.label, cx + cos * (r + 15), cy + sin * (r + 15));
@@ -216,7 +216,7 @@ export class PitchGaugeRenderer {
 
 		if (freqHz < 20) {
 			ctx.fillStyle = 'rgba(42, 42, 50, 0.15)';
-			ctx.font = '300 20px "JetBrains Mono"';
+			ctx.font = '300 22px "JetBrains Mono"';
 			ctx.textAlign = 'center';
 			ctx.textBaseline = 'middle';
 			ctx.fillText('—', cx, cy - 2);
@@ -228,14 +228,14 @@ export class PitchGaugeRenderer {
 			? (freqHz / 1000).toFixed(1) + 'k'
 			: Math.round(freqHz).toString();
 		ctx.fillStyle = 'rgba(42, 42, 50, 0.45)';
-		ctx.font = '300 22px "JetBrains Mono"';
+		ctx.font = '300 24px "JetBrains Mono"';
 		ctx.textAlign = 'center';
 		ctx.textBaseline = 'alphabetic';
 		ctx.fillText(hzStr, cx, cy - 1);
 
 		// Hz unit
 		ctx.fillStyle = 'rgba(42, 42, 50, 0.18)';
-		ctx.font = '400 9px "JetBrains Mono"';
+		ctx.font = '400 10px "JetBrains Mono"';
 		ctx.textBaseline = 'top';
 		ctx.fillText('Hz', cx, cy + 3);
 
@@ -244,7 +244,7 @@ export class PitchGaugeRenderer {
 		const r = Math.round(semi);
 		const note = NOTE_NAMES[((r % 12) + 12) % 12] + (Math.floor(r / 12) - 1);
 		ctx.fillStyle = 'rgba(42, 42, 50, 0.28)';
-		ctx.font = '500 11px "JetBrains Mono"';
+		ctx.font = '500 12px "JetBrains Mono"';
 		ctx.fillText(note, cx, cy + 15);
 	}
 

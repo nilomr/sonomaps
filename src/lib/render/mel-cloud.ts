@@ -68,13 +68,13 @@ export class MelCloudRenderer {
 		this.scene = new THREE.Scene();
 		const hh = this.orthoHalfHeight;
 		this.camera = new THREE.OrthographicCamera(-hh, hh, hh, -hh, 0.1, 200);
-		this.camera.position.set(8.83, 3.95, 6.33);
-		this.camera.zoom = 1.59;
+		this.camera.position.set(-4.13, 3.47, 8.66);
+		this.camera.zoom = 1.30;
 
 		this.controls = new OrbitControls(this.camera, canvas);
 		this.controls.enableDamping = true;
 		this.controls.dampingFactor = 0.12;
-		this.controls.target.set(1.73, -0.08, 1.17);
+		this.controls.target.set(0.60, 0.52, 0.78);
 		this.controls.enablePan = true;
 		this.controls.minZoom = 0.8;
 		this.controls.maxZoom = 3.5;

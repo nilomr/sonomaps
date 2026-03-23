@@ -93,9 +93,39 @@
 		radarCos[i] = Math.cos(a);
 		radarSin[i] = Math.sin(a);
 	}
-	const RADAR_LABELS = ['Centroid', 'Energy', 'Crossings', 'Tonality', 'Spread', 'Rolloff'];
+	const RADAR_LABELS = ['Centroid', 'Energy', 'Cross.', 'Tonality', 'Spread', 'Rolloff'];
 
-	const FFT_SIZE = 2048;
+	const radarTextStyle = {
+		labelFont: '500 9px "JetBrains Mono"',
+		labelColor: 'rgba(42,42,50,0.34)',
+		labelRadiusOffset: 24,
+		labelYOffset: -8,
+		valueFont: '400 10px "JetBrains Mono"',
+		valueColor: 'rgba(42,42,50,0.40)',
+		valueYOffset: 11
+	};
+
+	function readRadarTextStyle(): void {
+		if (!radarCanvas) return;
+		const host = radarCanvas.parentElement ?? radarCanvas;
+		const s = getComputedStyle(host);
+
+		radarTextStyle.labelFont = s.getPropertyValue('--radar-label-font').trim() || radarTextStyle.labelFont;
+		radarTextStyle.labelColor = s.getPropertyValue('--radar-label-color').trim() || radarTextStyle.labelColor;
+		radarTextStyle.valueFont = s.getPropertyValue('--radar-value-font').trim() || radarTextStyle.valueFont;
+		radarTextStyle.valueColor = s.getPropertyValue('--radar-value-color').trim() || radarTextStyle.valueColor;
+
+		const labelRadiusOffset = parseFloat(s.getPropertyValue('--radar-label-radius-offset'));
+		if (!Number.isNaN(labelRadiusOffset)) radarTextStyle.labelRadiusOffset = labelRadiusOffset;
+
+		const labelYOffset = parseFloat(s.getPropertyValue('--radar-label-y-offset'));
+		if (!Number.isNaN(labelYOffset)) radarTextStyle.labelYOffset = labelYOffset;
+
+		const valueYOffset = parseFloat(s.getPropertyValue('--radar-value-y-offset'));
+		if (!Number.isNaN(valueYOffset)) radarTextStyle.valueYOffset = valueYOffset;
+	}
+
+	const FFT_SIZE = 1024;
 	const NUM_MEL_BANDS = 124;
 	const MAX_POINTS = 10000;
 	const SAMPLE_INTERVAL_MS = 4;
@@ -173,6 +203,12 @@
 		return Math.round(hz).toString();
 	}
 
+	function fmtTonality(tonality: number): string {
+		const t = Math.max(0, Math.min(1, tonality));
+		if (t > 0.99) return t.toFixed(4);
+		return t.toFixed(3);
+	}
+
 	// ── High-frequency audio sampling (~250Hz) ───────────
 	function sampleAudio(): void {
 		if (!processing || !audioSource || !melExtractor || !embedding || !smoother) return;
@@ -196,10 +232,6 @@
 		const gate = Math.max(noiseFloorEma * noiseThreshold, MIN_GATE);
 		isAboveGate = rms >= gate;
 		if (!isAboveGate) return;
-
-		// Skip noise-like frames: high spectral flatness = broadband noise
-		// Only plot frames with tonal/structured content (flatness < 0.4)
-		if (melExtractor.flatness > 0.4) return;
 
 		embedding.projectFromExtractor(melExtractor, embeddingBuf);
 		pcaCalibrating = embedding.isWarmingUp;
@@ -252,6 +284,7 @@
 	function buildRadarGrid(w: number, h: number): void {
 		radarGridW = w;
 		radarGridH = h;
+		readRadarTextStyle();
 		const dpr = window.devicePixelRatio || 1;
 		radarGridCanvas = new OffscreenCanvas(Math.round(w * dpr), Math.round(h * dpr));
 		const g = radarGridCanvas.getContext('2d')!;
@@ -290,11 +323,11 @@
 		// Labels (static part — feature names)
 		g.textAlign = 'center';
 		g.textBaseline = 'middle';
-		g.fillStyle = 'rgba(42,42,50,0.38)';
-		g.font = '500 9px "JetBrains Mono"';
-		const lr = radius + 22;
+		g.fillStyle = radarTextStyle.labelColor;
+		g.font = radarTextStyle.labelFont;
+		const lr = radius + radarTextStyle.labelRadiusOffset;
 		for (let i = 0; i < RADAR_N; i++) {
-			g.fillText(RADAR_LABELS[i], cx + radarCos[i] * lr, cy + radarSin[i] * lr - 6);
+			g.fillText(RADAR_LABELS[i], cx + radarCos[i] * lr, cy + radarSin[i] * lr + radarTextStyle.labelYOffset);
 		}
 	}
 
@@ -378,11 +411,11 @@
 		// Value labels (dynamic — update every frame for smooth text)
 		radarCtx.textAlign = 'center';
 		radarCtx.textBaseline = 'middle';
-		radarCtx.fillStyle = 'rgba(42,42,50,0.58)';
-		radarCtx.font = '400 10px "JetBrains Mono"';
-		const lr = radius + 22;
+		radarCtx.fillStyle = radarTextStyle.valueColor;
+		radarCtx.font = radarTextStyle.valueFont;
+		const lr = radius + radarTextStyle.labelRadiusOffset;
 		for (let i = 0; i < RADAR_N; i++) {
-			radarCtx.fillText(vals[i], cx + radarCos[i] * lr, cy + radarSin[i] * lr + 7);
+			radarCtx.fillText(vals[i], cx + radarCos[i] * lr, cy + radarSin[i] * lr + radarTextStyle.valueYOffset);
 		}
 	}
 
@@ -402,7 +435,7 @@
 		pointCloud = new PointCloudRenderer(pointCanvas, {
 			maxPoints: MAX_POINTS,
 			outputDim,
-			pointSize: 1.6
+			pointSize: 1
 		});
 
 		const onResize = () => {
@@ -443,8 +476,9 @@
 					barRms = radarNorm.rms.update(Math.log1p(m.rms * 1000)) * 100;
 					featZcr = m.zcr.toFixed(3);
 					barZcr = radarNorm.zcr.update(m.zcr) * 100;
-					featFlat = m.flatness.toFixed(3);
-					barFlat = radarNorm.flatness.update(Math.log1p(m.flatness * 1000)) * 100;
+					const tonality = m.tonality;
+					featFlat = fmtTonality(tonality);
+					barFlat = radarNorm.flatness.update(tonality) * 100;
 					featBw = fmtHz(m.bandwidth);
 					barBw = radarNorm.bandwidth.update(Math.log1p(m.bandwidth)) * 100;
 					featRol = fmtHz(m.rolloff);
@@ -854,6 +888,13 @@
 		flex: 1;
 		min-height: 0;
 		position: relative;
+		--radar-label-font: 500 9px "JetBrains Mono";
+		--radar-label-color: rgba(42, 42, 50, 0.34);
+		--radar-label-radius-offset: 24;
+		--radar-label-y-offset: -8;
+		--radar-value-font: 400 10px "JetBrains Mono";
+		--radar-value-color: rgba(42, 42, 50, 0.4);
+		--radar-value-y-offset: 11;
 	}
 
 	.analysis-pitch {
@@ -867,6 +908,12 @@
 		width: 100%;
 		height: 100%;
 		display: block;
+	}
+
+	.analysis-pitch .panel-label.sub {
+		font-size: 10px;
+		top: 12px;
+		letter-spacing: 2px;
 	}
 
 	.analysis-scope {

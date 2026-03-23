@@ -46,6 +46,7 @@ export class MelFeatureExtractor {
 	rms = 0;            // RMS energy
 	zcr = 0;            // zero-crossing rate
 	flatness = 0;       // spectral flatness (0 = tonal, 1 = noise)
+	tonality = 0;       // spectral tonality (0 = noise-like, 1 = tonal/peaky)
 	bandwidth = 0;      // spectral bandwidth (Hz)
 	rolloff = 0;        // spectral rolloff (Hz)
 	peakFreq = 0;       // peak frequency (Hz) — bin with max power
@@ -145,6 +146,23 @@ export class MelFeatureExtractor {
 			}
 			this.melEnergies[m] = energy;
 			this.logMelEnergies[m] = Math.log(energy + 1e-10);
+		}
+
+		// ── Tonality via mel spectral entropy ───────────────
+		// Uniform broadband spectrum -> high entropy -> low tonality.
+		// Peaky harmonic spectrum -> low entropy -> high tonality.
+		let melSum = 0;
+		for (let m = 0; m < this.numMelBands; m++) melSum += this.melEnergies[m];
+		if (melSum > 0) {
+			let entropy = 0;
+			for (let m = 0; m < this.numMelBands; m++) {
+				const p = this.melEnergies[m] / melSum;
+				if (p > 1e-12) entropy -= p * Math.log(p);
+			}
+			const maxEntropy = Math.log(this.numMelBands);
+			this.tonality = maxEntropy > 0 ? Math.max(0, Math.min(1, 1 - entropy / maxEntropy)) : 0;
+		} else {
+			this.tonality = 0;
 		}
 
 		// ── MFCCs via DCT ────────────────────────────────────
