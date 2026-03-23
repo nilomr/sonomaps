@@ -17,6 +17,7 @@
 	let radarCanvas: HTMLCanvasElement;
 	let scopeCanvas: HTMLCanvasElement;
 	let pitchCanvas: HTMLCanvasElement;
+	let cardsViewport: HTMLDivElement;
 
 	// ── Rendering objects (not reactive) ──────────────────
 	let melCloud: MelCloudRenderer | null = null;
@@ -47,6 +48,18 @@
 	let floorDb = $state(-100);
 	let freqLo = $state(0);
 	let freqHi = $state(20000);
+
+	// ── Mobile state ────────────────────────────────────
+	let isMobile = $state(false);
+	let currentCard = $state(0);
+	let touchStartX = 0;
+	let touchStartY = 0;
+	let touchDeltaX = $state(0);
+	let isSwiping = false;
+	let touchStartTime = 0;
+
+	const CARD_NAMES = ['ANALYSIS', 'MEL SPECTROGRAM', 'TRAJECTORY'];
+	const NUM_CARDS = 3;
 
 	// ── Fixed parameters ─────────────────────────────────
 	const smoothing = 0.58;
@@ -438,6 +451,20 @@
 			pointSize: 1
 		});
 
+		// ── Mobile detection ──────────────────────────
+		const mql = window.matchMedia('(max-width: 768px)');
+		isMobile = mql.matches;
+		const onMqlChange = (e: MediaQueryListEvent) => {
+			isMobile = e.matches;
+			if (!isMobile) { currentCard = 0; touchDeltaX = 0; }
+		};
+		mql.addEventListener('change', onMqlChange);
+
+		// Non-passive touchmove for preventDefault
+		if (cardsViewport) {
+			cardsViewport.addEventListener('touchmove', onTouchMove, { passive: false });
+		}
+
 		const onResize = () => {
 			melCloud?.resize();
 			spectrogram?.resize();
@@ -451,17 +478,21 @@
 				spectrogram?.addColumn(melExtractor.logMelEnergies);
 			}
 
-			melCloud?.render();
-			pointCloud?.render();
-			renderRadar();
+			// Render only visible card on mobile for performance
+			// Card order on mobile: 0=Analysis, 1=Mel, 2=Trajectory
+			if (!isMobile || currentCard === 0) renderRadar();
+			if (!isMobile || currentCard === 1) melCloud?.render();
+			if (!isMobile || currentCard === 2) pointCloud?.render();
 
-			// Oscilloscope + pitch gauge
-			if (processing && audioSource) {
-				scope?.draw(audioSource.timeData);
-				pitchGauge?.draw(melExtractor?.peakFreq ?? 0, melExtractor?.rms ?? 0);
-			} else {
-				scope?.draw(new Float32Array(0));
-				pitchGauge?.draw(0, 0);
+			// Oscilloscope + pitch gauge (Analysis card)
+			if (!isMobile || currentCard === 0) {
+				if (processing && audioSource) {
+					scope?.draw(audioSource.timeData);
+					pitchGauge?.draw(melExtractor?.peakFreq ?? 0, melExtractor?.rms ?? 0);
+				} else {
+					scope?.draw(new Float32Array(0));
+					pitchGauge?.draw(0, 0);
+				}
 			}
 
 			featCounter++;
@@ -510,6 +541,8 @@
 			cancelAnimationFrame(animFrameId);
 			clearInterval(sampleIntervalId);
 			window.removeEventListener('resize', onResize);
+			mql.removeEventListener('change', onMqlChange);
+			cardsViewport?.removeEventListener('touchmove', onTouchMove);
 			stop();
 			melCloud?.dispose();
 			pointCloud?.dispose();
@@ -604,59 +637,160 @@
 		melExtractor.minFreqHz = freqLo;
 		melExtractor.maxFreqHz = freqHi;
 	}
+
+	// ── Mobile touch handlers ───────────────────────────
+	function onTouchStart(e: TouchEvent) {
+		if (!isMobile) return;
+		touchStartX = e.touches[0].clientX;
+		touchStartY = e.touches[0].clientY;
+		touchStartTime = Date.now();
+		touchDeltaX = 0;
+		isSwiping = false;
+	}
+
+	function onTouchMove(e: TouchEvent) {
+		if (!isMobile) return;
+		const dx = e.touches[0].clientX - touchStartX;
+		const dy = e.touches[0].clientY - touchStartY;
+
+		if (!isSwiping) {
+			if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 8) {
+				isSwiping = true;
+			} else {
+				return;
+			}
+		}
+
+		e.preventDefault();
+		// Rubber band at edges
+		if ((currentCard === 0 && dx > 0) || (currentCard === NUM_CARDS - 1 && dx < 0)) {
+			touchDeltaX = dx * 0.25;
+		} else {
+			touchDeltaX = dx;
+		}
+	}
+
+	function onTouchEnd() {
+		if (!isMobile || !isSwiping) {
+			touchDeltaX = 0;
+			return;
+		}
+		const elapsed = Date.now() - touchStartTime;
+		const velocity = Math.abs(touchDeltaX / Math.max(elapsed, 1));
+		// Velocity-based: fast flicks need less distance
+		const threshold = velocity > 0.4 ? 30 : window.innerWidth * 0.2;
+
+		if (touchDeltaX < -threshold && currentCard < NUM_CARDS - 1) {
+			currentCard++;
+		} else if (touchDeltaX > threshold && currentCard > 0) {
+			currentCard--;
+		}
+		touchDeltaX = 0;
+		isSwiping = false;
+		triggerCardResize();
+	}
+
+	function triggerCardResize() {
+		setTimeout(() => {
+			melCloud?.resize();
+			spectrogram?.resize();
+			pointCloud?.resize();
+		}, 60);
+	}
+
+	function goToCard(i: number) {
+		currentCard = i;
+		triggerCardResize();
+	}
 </script>
 
 <svelte:head>
 	<title>SonoMaps</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+	<meta name="theme-color" content="#f2ede4" />
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
 	<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet" />
 </svelte:head>
 
-<main>
-	<!-- ─── Mel cloud (left) ─── -->
-	<section class="panel mel-cloud">
-		<div class="mel-3d">
-			<canvas bind:this={melCanvas}></canvas>
+<main class:mobile={isMobile}>
+	<!-- ─── Mobile header ─── -->
+	<header class="mobile-header">
+		<div class="mobile-brand">
+			<span class="brand-top">SONO</span>
+			<span class="brand-bottom">MAPS</span>
 		</div>
-		<div class="mel-2d">
-			<canvas bind:this={spectroCanvas}></canvas>
+		<span class="status-badge mobile-status" class:active={isRunning}>{status}</span>
+		<div class="mobile-fps">
+			<span class="fps-number">{fps}</span>
+			<span class="fps-label">FPS</span>
 		</div>
-		<span class="panel-label">MEL SPECTROGRAM</span>
-	</section>
+	</header>
 
-	<!-- ─── Trajectory (center) ─── -->
-	<section class="panel trajectory">
-		<canvas bind:this={pointCanvas}></canvas>
-		<span class="panel-label">TRAJECTORY</span>
-		<div class="axes-overlay">
-			{#if isRunning && pcaCalibrating}
-				CALIBRATING
-			{:else}
-				<span class="ax-key">X</span> PC1
-				<span class="ax-sep">/</span>
-				<span class="ax-key">Y</span> PC2
-				<span class="ax-sep">/</span>
-				<span class="ax-key">Z</span> PC3
-			{/if}
-		</div>
-	</section>
+	<!-- ─── Card viewport (wraps all viz panels) ─── -->
+	<div class="cards-viewport" bind:this={cardsViewport}
+		ontouchstart={onTouchStart}
+		ontouchend={onTouchEnd}>
+		<div class="cards-track"
+			style={isMobile ? `transform:translateX(calc(${-currentCard} * (100vw - 28px) + ${touchDeltaX}px));${isSwiping ? '' : 'transition:transform 0.35s cubic-bezier(0.22,0.68,0.35,1)'}` : ''}>
 
-	<!-- ─── Analysis (right) ─── -->
-	<section class="panel analysis">
-		<div class="analysis-radar">
-			<canvas bind:this={radarCanvas} class="fill-canvas"></canvas>
+			<!-- ─── Analysis (card 0 on mobile) ─── -->
+			<section class="panel analysis">
+				<div class="analysis-radar">
+					<canvas bind:this={radarCanvas} class="fill-canvas"></canvas>
+				</div>
+				<div class="analysis-pitch">
+					<canvas bind:this={pitchCanvas}></canvas>
+					<span class="panel-label sub">PEAK FREQ</span>
+				</div>
+				<div class="analysis-scope">
+					<canvas bind:this={scopeCanvas}></canvas>
+					<span class="panel-label sub">WAVEFORM</span>
+				</div>
+				<span class="panel-label">ANALYSIS</span>
+			</section>
+
+			<!-- ─── Mel cloud (card 1 on mobile) ─── -->
+			<section class="panel mel-cloud">
+				<div class="mel-3d">
+					<canvas bind:this={melCanvas}></canvas>
+				</div>
+				<div class="mel-2d">
+					<canvas bind:this={spectroCanvas}></canvas>
+				</div>
+				<span class="panel-label">MEL SPECTROGRAM</span>
+			</section>
+
+			<!-- ─── Trajectory (card 2 on mobile) ─── -->
+			<section class="panel trajectory">
+				<canvas bind:this={pointCanvas}></canvas>
+				<span class="panel-label">TRAJECTORY</span>
+				<div class="axes-overlay">
+					{#if isRunning && pcaCalibrating}
+						CALIBRATING
+					{:else}
+						<span class="ax-key">X</span> PC1
+						<span class="ax-sep">/</span>
+						<span class="ax-key">Y</span> PC2
+						<span class="ax-sep">/</span>
+						<span class="ax-key">Z</span> PC3
+					{/if}
+				</div>
+			</section>
 		</div>
-		<div class="analysis-pitch">
-			<canvas bind:this={pitchCanvas}></canvas>
-			<span class="panel-label sub">PEAK FREQ</span>
+	</div>
+
+	<!-- ─── Card indicator (visible on mobile) ─── -->
+	<nav class="card-indicator">
+		<span class="card-label">{CARD_NAMES[currentCard]}</span>
+		<div class="card-dots">
+			{#each CARD_NAMES as _, i}
+				<button class="card-dot" class:active={currentCard === i}
+					onclick={() => goToCard(i)}
+					aria-label={CARD_NAMES[i]}></button>
+			{/each}
 		</div>
-		<div class="analysis-scope">
-			<canvas bind:this={scopeCanvas}></canvas>
-			<span class="panel-label sub">WAVEFORM</span>
-		</div>
-		<span class="panel-label">ANALYSIS</span>
-	</section>
+	</nav>
 
 	<!-- ─── Controls bar ─── -->
 	<section class="panel controls-bar">
@@ -761,6 +895,10 @@
 			<span class="fps-label">FPS</span>
 		</div>
 	</section>
+
+	<!-- ─── Mobile credit (very bottom) ─── -->
+	<a class="mobile-credit" href="https://sedum.studio" target="_blank"
+		rel="noopener noreferrer">designed by <span>sedum.studio</span></a>
 </main>
 
 <style>
@@ -1373,7 +1511,14 @@
 		color: rgba(42, 42, 50, 0.45);
 	}
 
-	/* ── Responsive ──────────────────────────────── */
+	/* ── Desktop: card wrappers are transparent ─── */
+	.cards-viewport { display: contents; }
+	.cards-track { display: contents; }
+	.mobile-header { display: none; }
+	.card-indicator { display: none; }
+	.mobile-credit { display: none; }
+
+	/* ── Responsive (desktop) ────────────────────── */
 	@media (max-width: 1200px) {
 		.ctrl-section { padding: 0 12px; }
 		.ctrl-brand { padding-right: 14px; }
@@ -1381,7 +1526,7 @@
 		.filter-group { gap: 6px; padding-left: 8px; margin-left: 4px; }
 	}
 
-	@media (max-width: 960px) {
+	@media (max-width: 960px) and (min-width: 769px) {
 		.controls-bar { padding: 10px 16px 28px; }
 		.ctrl-section { padding: 0 8px; }
 		.param-wheel { width: 70px; }
@@ -1389,5 +1534,323 @@
 		.ctrl-brand { gap: 8px; }
 		.brand-top, .brand-bottom { font-size: 13px; letter-spacing: 4px; }
 		.design-credit { left: 16px; bottom: 8px; }
+	}
+
+	/* ═══════════════════════════════════════════════
+	   MOBILE LAYOUT (≤768px)
+	   ═══════════════════════════════════════════════ */
+	@media (max-width: 768px) {
+		/* ── Main grid → flex column ──────────── */
+		main.mobile {
+			display: flex;
+			flex-direction: column;
+			grid-template-columns: unset;
+			grid-template-rows: unset;
+			grid-template-areas: unset;
+			gap: 0;
+			background: #f2ede4;
+		}
+
+		/* ── Mobile header ────────────────────── */
+		.mobile-header {
+			display: flex;
+			align-items: flex-end;
+			padding: 14px 18px 12px;
+			padding-top: calc(14px + env(safe-area-inset-top));
+			background: #f2ede4;
+			flex-shrink: 0;
+			z-index: 10;
+			border-bottom: 1px solid rgba(42, 42, 50, 0.10);
+			gap: 14px;
+		}
+
+		.mobile-brand {
+			display: flex;
+			flex-direction: column;
+			line-height: 1.15;
+			transform: translateY(3px);
+		}
+
+		.mobile-brand .brand-top {
+			font-size: 12px;
+			font-weight: 600;
+			letter-spacing: 5px;
+			color: rgba(42, 42, 50, 0.48);
+		}
+
+		.mobile-brand .brand-bottom {
+			font-size: 12px;
+			font-weight: 300;
+			letter-spacing: 5px;
+			color: rgba(42, 42, 50, 0.28);
+		}
+
+		.mobile-status {
+			width: auto;
+			min-width: 60px;
+			padding: 3px 8px;
+			font-size: 8px;
+			margin-left: auto;
+		}
+
+		.mobile-fps {
+			display: flex;
+			align-items: baseline;
+			gap: 3px;
+			flex-shrink: 0;
+		}
+
+		.mobile-fps .fps-number {
+			font-size: 12px;
+			font-weight: 300;
+			color: rgba(42, 42, 50, 0.25);
+			font-variant-numeric: tabular-nums;
+			line-height: 1;
+		}
+
+		.mobile-fps .fps-label {
+			font-size: 7px;
+			font-weight: 500;
+			letter-spacing: 1.5px;
+			color: rgba(42, 42, 50, 0.18);
+		}
+
+		/* ── Cards viewport (peek effect) ────── */
+		.cards-viewport {
+			display: block;
+			flex: 1;
+			min-height: 0;
+			overflow: hidden;
+			position: relative;
+		}
+
+		.cards-track {
+			display: flex;
+			margin-left: 14px;
+			height: 100%;
+			will-change: transform;
+		}
+
+		.cards-track > .panel {
+			width: calc(100vw - 28px);
+			flex-shrink: 0;
+			height: 100%;
+			box-sizing: border-box;
+			border-right: 1px solid rgba(42, 42, 50, 0.12);
+			touch-action: pan-y pinch-zoom;
+		}
+
+		.cards-track > .panel:first-child {
+			border-left: 1px solid rgba(42, 42, 50, 0.12);
+		}
+
+		/* ── Card indicator ───────────────────── */
+		.card-indicator {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			padding: 9px 18px;
+			background: #f2ede4;
+			flex-shrink: 0;
+			border-top: 1px solid rgba(42, 42, 50, 0.10);
+		}
+
+		.card-label {
+			font-size: 9px;
+			font-weight: 500;
+			letter-spacing: 2.5px;
+			color: rgba(42, 42, 50, 0.35);
+			min-width: 100px;
+		}
+
+		.card-dots {
+			display: flex;
+			gap: 6px;
+			align-items: center;
+		}
+
+		.card-dot {
+			width: 16px;
+			height: 2px;
+			padding: 0;
+			border: none;
+			background: rgba(42, 42, 50, 0.12);
+			cursor: pointer;
+			transition: all 0.3s ease;
+		}
+
+		.card-dot.active {
+			width: 24px;
+			background: rgba(42, 42, 50, 0.40);
+		}
+
+		/* ── Panel labels ────────────────────── */
+		.panel-label:not(.sub) {
+			display: none;
+		}
+
+		.panel-label.sub {
+			top: 8px;
+			left: 14px;
+			font-size: 8px;
+		}
+
+		.axes-overlay {
+			bottom: 12px;
+			left: 14px;
+			font-size: 9px;
+		}
+
+		/* ── Analysis panel ──────────────────── */
+		.analysis-radar {
+			--radar-label-font: 500 8px "JetBrains Mono";
+			--radar-label-radius-offset: 20;
+			--radar-value-font: 400 9px "JetBrains Mono";
+		}
+
+		/* ── Controls bar (mobile) ───────────── */
+		.controls-bar {
+			flex-direction: column;
+			align-items: stretch;
+			gap: 12px;
+			padding: 14px 18px 12px;
+			padding-bottom: calc(12px + env(safe-area-inset-bottom));
+			flex-shrink: 0;
+			border-top: 1px solid rgba(42, 42, 50, 0.10);
+		}
+
+		/* Hide desktop-only elements */
+		.ctrl-brand { display: none; }
+		.ctrl-sep { display: none; }
+		.filter-group { display: none; }
+		.ctrl-fps { display: none; }
+
+		/* Section labels visible as row headers */
+		.section-label {
+			font-size: 8px;
+			letter-spacing: 2px;
+			color: rgba(42, 42, 50, 0.22);
+			height: auto;
+			margin-bottom: 6px;
+		}
+
+		/* Input section */
+		.ctrl-section {
+			padding: 0;
+			gap: 0;
+		}
+
+		.controls-bar > .ctrl-section:not(.grow) .section-label {
+			display: none;
+		}
+
+		.controls-bar > .ctrl-section:first-of-type .section-body {
+			padding-right: 132px;
+		}
+
+		.section-body {
+			gap: 10px;
+			align-items: center;
+		}
+
+		.ctrl-btn.play {
+			width: 30px;
+			height: 30px;
+		}
+
+		.input-toggle {
+			height: 30px;
+		}
+
+		.toggle-btn {
+			padding: 0 12px;
+			font-size: 9px;
+			letter-spacing: 1.5px;
+		}
+
+		.file-btn {
+			height: 30px;
+			padding: 0 10px;
+			font-size: 9px;
+		}
+
+		/* Parameters section: full-width volume */
+		.ctrl-section.grow {
+			flex: none;
+			width: 100%;
+		}
+
+		.params-body {
+			gap: 8px;
+		}
+
+		.param {
+			gap: 8px;
+			width: 100%;
+		}
+
+		.param-label {
+			font-size: 9px;
+			flex-shrink: 0;
+		}
+
+		.param-wheel {
+			flex: 1;
+			width: auto;
+			min-width: 0;
+		}
+
+		.param-readout {
+			width: 30px;
+			font-size: 9px;
+		}
+
+		/* ── Credit inside controls on mobile ──────────────── */
+		.design-credit {
+			display: block;
+			position: absolute;
+			top: 14px;
+			right: 18px;
+			left: auto;
+			bottom: auto;
+			transform: none;
+			font-size: 8px;
+			letter-spacing: 0.3px;
+			color: rgba(34, 34, 41, 0.24);
+			text-align: right;
+		}
+
+		/* ── Mobile credit (very bottom of page) ─────────── */
+		.mobile-credit {
+			display: none;
+			text-align: center;
+			padding: 8px 18px;
+			padding-bottom: calc(8px + env(safe-area-inset-bottom));
+			font-size: 8px;
+			font-weight: 600;
+			letter-spacing: 0.35px;
+			color: rgba(34, 34, 41, 0.22);
+			text-decoration: none;
+			text-transform: lowercase;
+			flex-shrink: 0;
+			transition: color 0.15s ease;
+		}
+
+		.mobile-credit span {
+			font-weight: 800;
+			letter-spacing: 1px;
+			border-bottom: 1px solid rgba(42, 42, 50, 0.15);
+			padding-bottom: 1px;
+		}
+
+		.mobile-credit:hover {
+			color: rgba(42, 42, 50, 0.40);
+		}
+
+		/* ── Mel panel mobile adjustments ────── */
+		.mel-2d {
+			height: 12%;
+			min-height: 24px;
+		}
 	}
 </style>
