@@ -1,42 +1,97 @@
-# sv
+# sonomaps
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+SonoMaps is a browser-based audio visualization playground. I've built it for
+students in my introduction to acoustics and bioacoustics courses at the
+University of Oxford, but I might expand it to use more semantically interesting
+embedding models if I find the time. The goal is to provide a simple,
+interactive tool for exploring the structure of sound in real time.
 
-## Creating a project
+It takes live mic input or an uploaded audio file, extracts some spectral
+features in real time, then maps those features into several synchronized visual
+views: mel spectrogram, trajectory cloud, radar chart, waveform, and pitch gauge.
 
-If you're seeing this, you've probably already done this step. Congrats!
+## What it does
 
-```sh
-# create a new project
-npx sv create my-app
+- Real-time analysis from microphone or local audio file.
+- Mel feature extraction and derived spectral metrics.
+- Streaming 3D trajectory embedding of the audio feature space.
+- Coordinated visual panels for spectrogram, radar analysis, waveform, and peak frequency.
+- A few adjustable runtime controls (volume, spectral floor, low/high frequency bounds).
+
+## Stack
+
+- SvelteKit + Svelte 5 (runes)
+- TypeScript
+- Vite
+- Three.js (point cloud rendering)
+- Web Audio API + Canvas/WebGL
+
+## Quick start
+
+Requirements:
+
+- Node 20+
+- pnpm
+
+Install and run:
+
+```bash
+pnpm install
+pnpm dev
 ```
 
-To recreate this project with the same configuration:
+Type-check:
 
-```sh
-# recreate this project
-pnpm dlx sv@0.12.8 create --template minimal --types ts --install pnpm .
+```bash
+pnpm check
 ```
 
-## Developing
+Production build:
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
-
-```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
+```bash
+pnpm build
+pnpm preview
 ```
 
-## Building
+## Using the app
 
-To create a production version of your app:
+1. Open the app in a modern desktop browser.
+2. Choose input mode: MIC or FILE.
+3. Press play.
+4. If using MIC, allow microphone permission.
+5. Tune controls as needed:
+	 - VOL: input gain
+	 - FLOOR: dB floor for spectral gating
+	 - LO / HI: analysis band limits
 
-```sh
-npm run build
+Notes:
+
+- The app runs client-side only. SSR is disabled because it depends on browser APIs.
+- For mic mode, behavior can vary with browser/OS audio processing settings.
+
+## Project layout
+
+```text
+src/
+	lib/
+		audio/       # Audio source setup (mic/file + analyser pipeline)
+		dsp/         # Mel filterbank + feature extraction
+		embedding/   # Online 'PCA' + smoothing
+		render/      # Canvas/WebGL renderers
+	routes/
+		+page.svelte # Main app UI + orchestration loop
+		+page.ts     # SSR disabled for browser APIs
 ```
 
-You can preview the production build with `npm run preview`.
+## Scripts
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+- pnpm dev: run local dev server
+- pnpm build: production build
+- pnpm preview: preview production build
+- pnpm check: Svelte sync + type checks
+
+## Current status
+
+This is an active prototype. The core pipeline is stable enough for experimentation, but the UX and visual language are still evolving.
+
+If you open an issue or PR, small focused changes are easiest to review.
