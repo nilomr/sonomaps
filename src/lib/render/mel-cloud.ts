@@ -1,14 +1,19 @@
 /**
  * 3D Mel spectrogram point cloud renderer.
  *
- * Renders mel spectrogram data as a scrolling 3D point cloud:
+ * Renders mel spectrogram data as a scrolling 3D particle cloud:
  *   X axis: time (rolling window, scrolling left)
  *   Y axis: mel frequency bins
  *   Z axis: amplitude (energy)
  *
+ * Particles use gaussian falloff so overlapping points accumulate
+ * into density fields. An energy threshold hides the noise floor,
+ * and dramatic size scaling makes patterns emerge from particle
+ * density rather than individual point colours.
+ *
  * Positions are computed in the vertex shader from per-point attributes
  * and a single uniform frame counter, so only 80 attribute writes are
- * needed per new audio frame (not the full 20K-point buffer).
+ * needed per new audio frame (not the full point buffer).
  */
 
 import * as THREE from 'three';
@@ -24,7 +29,7 @@ export interface MelCloudConfig {
 export class MelCloudRenderer {
 	private renderer: THREE.WebGLRenderer;
 	private scene: THREE.Scene;
-	private camera: THREE.PerspectiveCamera;
+	private camera: THREE.OrthographicCamera;
 	private controls: OrbitControls;
 
 	private geometry: THREE.BufferGeometry;
@@ -41,12 +46,13 @@ export class MelCloudRenderer {
 	private rangeMin = -10;
 	private rangeMax = 0;
 	private readonly rangeDecay = 0.995;
+	private readonly orthoHalfHeight = 4.8;
 
 	constructor(canvas: HTMLCanvasElement, config?: MelCloudConfig) {
 		this.maxFrames = config?.maxFrames ?? 250;
 		this.numBands = config?.numBands ?? 80;
 		const maxPoints = this.maxFrames * this.numBands;
-		const pointSize = config?.pointSize ?? 0.4;
+		const pointSize = config?.pointSize ?? 1.2;
 
 		// ── Renderer ───────────────────────────────────────
 		this.renderer = new THREE.WebGLRenderer({
@@ -60,16 +66,18 @@ export class MelCloudRenderer {
 
 		// ── Scene & camera ─────────────────────────────────
 		this.scene = new THREE.Scene();
-		this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
-		this.camera.position.set(7, 5, 5);
+		const hh = this.orthoHalfHeight;
+		this.camera = new THREE.OrthographicCamera(-hh, hh, hh, -hh, 0.1, 200);
+		this.camera.position.set(8.83, 3.95, 6.33);
+		this.camera.zoom = 1.59;
 
 		this.controls = new OrbitControls(this.camera, canvas);
 		this.controls.enableDamping = true;
 		this.controls.dampingFactor = 0.12;
-		this.controls.target.set(0, 0, 1);
+		this.controls.target.set(1.73, -0.08, 1.17);
 		this.controls.enablePan = true;
-		this.controls.minDistance = 3;
-		this.controls.maxDistance = 40;
+		this.controls.minZoom = 0.8;
+		this.controls.maxZoom = 3.5;
 
 		this.initGuideLines();
 
@@ -102,7 +110,7 @@ export class MelCloudRenderer {
 
 		// Prevent frustum culling (positions are computed in shader)
 		this.geometry.boundingSphere = new THREE.Sphere(
-			new THREE.Vector3(0, 0, 1.25), 15
+			new THREE.Vector3(0, 0, 0.6), 15
 		);
 
 		// ── Material ───────────────────────────────────────
@@ -145,9 +153,9 @@ export class MelCloudRenderer {
 
 		// Back wall edges (X = -4, showing freq × amplitude)
 		const back = new Float32Array([
-			-4, -2.5, 0,   -4, -2.5, 2.5,
-			-4,  2.5, 0,   -4,  2.5, 2.5,
-			-4, -2.5, 2.5, -4,  2.5, 2.5
+			-4, -2.5, 0,   -4, -2.5, 1.2,
+			-4,  2.5, 0,   -4,  2.5, 1.2,
+			-4, -2.5, 1.2, -4,  2.5, 1.2
 		]);
 		const backGeo = new THREE.BufferGeometry();
 		backGeo.setAttribute('position', new THREE.Float32BufferAttribute(back, 3));
@@ -186,12 +194,28 @@ export class MelCloudRenderer {
 		this.head++;
 	}
 
+	// Camera logging throttle
+	private lastCameraLog = 0;
+
 	/** Render one frame. Also advances the frame counter for age-based fading. */
 	render(): void {
 		this.frameCounter++;
 		this.material.uniforms.uCurrentFrame.value = this.frameCounter;
 		this.controls.update();
 		this.renderer.render(this.scene, this.camera);
+
+		// Log camera settings every 2 seconds
+		const now = performance.now();
+		if (now - this.lastCameraLog > 2000) {
+			this.lastCameraLog = now;
+			const p = this.camera.position;
+			const t = this.controls.target;
+			console.log(
+				`[MelCloud camera] pos=(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) ` +
+				`target=(${t.x.toFixed(2)}, ${t.y.toFixed(2)}, ${t.z.toFixed(2)}) ` +
+				`zoom=${this.camera.zoom.toFixed(2)}`
+			);
+		}
 	}
 
 	clear(): void {
@@ -207,7 +231,12 @@ export class MelCloudRenderer {
 		const w = parent.clientWidth;
 		const h = parent.clientHeight;
 		this.renderer.setSize(w, h);
-		this.camera.aspect = w / h;
+		const aspect = w / h;
+		const hh = this.orthoHalfHeight;
+		this.camera.left = -hh * aspect;
+		this.camera.right = hh * aspect;
+		this.camera.top = hh;
+		this.camera.bottom = -hh;
 		this.camera.updateProjectionMatrix();
 	}
 

@@ -1,123 +1,186 @@
 /**
- * Configurable feature embedding for projecting audio features to 3D.
+ * Online PCA embedding: projects 13-dim MFCC vectors into 3D space.
  *
- * The user selects which audio feature maps to each spatial axis from
- * a catalogue of scientifically grounded descriptors. Each axis is
- * independently z-scored with online EMA statistics so the embedding
- * auto-scales regardless of mic gain or input level.
+ * Uses exponential moving average covariance with deflated power iteration
+ * to track the top 3 principal components of the live MFCC distribution.
+ * Similar sounds cluster together because they produce similar MFCC patterns;
+ * different sounds occupy different regions because PCA finds the axes of
+ * maximum acoustic variation.
+ *
+ * All buffers pre-allocated; hot-path is GC-free.
  */
 
 import type { MelFeatureExtractor } from '../dsp/mel.js';
 
-/** Implement this interface to swap in a neural embedding model. */
 export interface EmbeddingModel {
 	readonly outputDim: number;
 	projectFromExtractor(extractor: MelFeatureExtractor, out: Float32Array): void;
 }
 
-// ── Feature catalogue ────────────────────────────────────
-
-export interface FeatureDef {
-	readonly id: string;
-	/** Short name for dropdown UI. */
-	readonly label: string;
-	/** Short label for the 3D axis overlay. */
-	readonly axisLabel: string;
-	/** Extract a scalar value from the current frame. */
-	readonly extract: (ext: MelFeatureExtractor) => number;
-}
-
-export const FEATURES: readonly FeatureDef[] = [
-	{ id: 'centroid',  label: 'Centroid',   axisLabel: 'BRIGHTNESS', extract: ext => Math.log1p(ext.centroid) },
-	{ id: 'bandwidth', label: 'Bandwidth',  axisLabel: 'WIDTH',      extract: ext => Math.log1p(ext.bandwidth) },
-	{ id: 'rolloff',   label: 'Rolloff',    axisLabel: 'ROLLOFF',    extract: ext => Math.log1p(ext.rolloff) },
-	{ id: 'rms',       label: 'RMS Energy', axisLabel: 'ENERGY',     extract: ext => Math.log1p(ext.rms * 500) },
-	{ id: 'zcr',       label: 'Zero Cross', axisLabel: 'NOISINESS',  extract: ext => ext.zcr },
-	{ id: 'flatness',  label: 'Flatness',   axisLabel: 'TONALITY',   extract: ext => ext.flatness },
-	{ id: 'peakFreq',  label: 'Peak Freq',  axisLabel: 'PEAK FREQ',  extract: ext => Math.log1p(ext.peakFreq) },
-	{ id: 'mfcc1',     label: 'MFCC 1',     axisLabel: 'MFCC 1',     extract: ext => ext.mfccs[1] },
-	{ id: 'mfcc2',     label: 'MFCC 2',     axisLabel: 'MFCC 2',     extract: ext => ext.mfccs[2] },
-	{ id: 'mfcc3',     label: 'MFCC 3',     axisLabel: 'MFCC 3',     extract: ext => ext.mfccs[3] },
-	{ id: 'mfcc4',     label: 'MFCC 4',     axisLabel: 'MFCC 4',     extract: ext => ext.mfccs[4] },
-];
-
-const FEATURE_MAP = new Map(FEATURES.map(f => [f.id, f]));
-
-export function getFeature(id: string): FeatureDef {
-	return FEATURE_MAP.get(id) ?? FEATURES[0];
-}
-
-// ── Online z-score normalisation ─────────────────────────
-
-class OnlineStat {
-	mean = 0;
-	variance = 1;
-	private readonly decay: number;
-	private warmup = 0;
-	private readonly warmupFrames: number;
-
-	constructor(decay = 0.995, warmupFrames = 50) {
-		this.decay = decay;
-		this.warmupFrames = warmupFrames;
-	}
-
-	update(x: number): number {
-		if (this.warmup < this.warmupFrames) {
-			this.warmup++;
-			const n = this.warmup;
-			const oldMean = this.mean;
-			this.mean += (x - oldMean) / n;
-			this.variance += (x - oldMean) * (x - this.mean);
-			if (n > 1) {
-				const std = Math.sqrt(this.variance / (n - 1));
-				return std > 1e-6 ? (x - this.mean) / std : 0;
-			}
-			return 0;
-		}
-		const d = this.decay;
-		this.mean = d * this.mean + (1 - d) * x;
-		const diff = x - this.mean;
-		this.variance = d * this.variance + (1 - d) * diff * diff;
-		const std = Math.sqrt(this.variance);
-		return std > 1e-6 ? diff / std : 0;
-	}
-
-	reset(): void {
-		this.mean = 0;
-		this.variance = 1;
-		this.warmup = 0;
-	}
-}
-
-// ── Configurable feature embedding ──────────────────────
-
-export class DirectFeatureEmbedding implements EmbeddingModel {
+export class OnlinePCAEmbedding implements EmbeddingModel {
 	readonly outputDim = 3;
-	private extractors: ((ext: MelFeatureExtractor) => number)[];
-	private readonly stats: OnlineStat[];
-	private readonly scale: number;
 
-	constructor(axes: [string, string, string] = ['centroid', 'bandwidth', 'zcr'], scale = 3.0) {
-		this.scale = scale;
-		this.extractors = axes.map(id => getFeature(id).extract);
-		// At ~250 samples/sec, decay=0.995 gives ~0.8s effective window.
-		this.stats = Array.from({ length: 3 }, () => new OnlineStat(0.995, 50));
+	private readonly D = 13;
+	private frameCount = 0;
+
+	// EMA statistics (hot-path, pre-allocated)
+	private readonly mean = new Float32Array(13);
+	private readonly cov = new Float32Array(13 * 13); // symmetric, row-major
+	private readonly centered = new Float32Array(13);
+
+	// Top-3 eigenvectors stored row-major: V[k*D + i] = component i of PC k
+	private readonly V = new Float32Array(13 * 3);
+	private readonly sqrtLambda = new Float32Array(3); // sqrt(eigenvalues) for normalisation
+
+	// Pre-allocated scratch for eigenvector computation (not hot-path)
+	private readonly _Vwork = new Float32Array(13 * 3);
+	private readonly _buf = new Float32Array(13);
+
+	// EMA alpha: ~500-frame window (≈2 s at 250 Hz sampling)
+	private readonly alpha = 0.002;
+	// Number of frames before first projection (lets EMA stabilise)
+	private readonly warmupFrames = 250;
+	// Re-compute eigenvectors every N frames (~200 ms)
+	private readonly updateInterval = 50;
+	// Output scale (visual spread)
+	private readonly outputScale = 2.8;
+
+	constructor() {
+		// Initialise to first 3 standard basis vectors so early projections
+		// degrade gracefully to MFCC 0/1/2 before eigenvectors converge.
+		for (let k = 0; k < 3; k++) this.V[k * this.D + k] = 1.0;
+		this.sqrtLambda.fill(1.0);
 	}
 
-	/** Change which features map to the three spatial axes. Resets statistics. */
-	setAxes(axes: [string, string, string]): void {
-		this.extractors = axes.map(id => getFeature(id).extract);
-		for (const s of this.stats) s.reset();
+	/** True while the covariance estimate has not yet stabilised. */
+	get isWarmingUp(): boolean {
+		return this.frameCount < this.warmupFrames;
 	}
 
 	projectFromExtractor(ext: MelFeatureExtractor, out: Float32Array): void {
-		const s = this.scale;
-		out[0] = this.stats[0].update(this.extractors[0](ext)) * s;
-		out[1] = this.stats[1].update(this.extractors[1](ext)) * s;
-		out[2] = this.stats[2].update(this.extractors[2](ext)) * s;
+		const { D, alpha } = this;
+		const mfccs = ext.mfccs;
+		this.frameCount++;
+
+		// 1. Update running mean (EMA)
+		for (let i = 0; i < D; i++) {
+			this.mean[i] += alpha * (mfccs[i] - this.mean[i]);
+		}
+
+		// 2. Centre current frame
+		for (let i = 0; i < D; i++) {
+			this.centered[i] = mfccs[i] - this.mean[i];
+		}
+
+		// 3. Update upper-triangle covariance (EMA outer product), copy to lower
+		for (let i = 0; i < D; i++) {
+			const ci = this.centered[i];
+			for (let j = i; j < D; j++) {
+				const idx = i * D + j;
+				this.cov[idx] += alpha * (ci * this.centered[j] - this.cov[idx]);
+				if (i !== j) this.cov[j * D + i] = this.cov[idx];
+			}
+		}
+
+		// 4. Periodically re-compute eigenvectors once warm
+		if (this.frameCount % this.updateInterval === 0 && this.frameCount >= this.warmupFrames) {
+			this._computeEigenvectors();
+		}
+
+		// 5. Return zeros during warm-up (caller should suppress point-cloud adds)
+		if (this.frameCount < this.warmupFrames) {
+			out[0] = out[1] = out[2] = 0;
+			return;
+		}
+
+		// 6. Project centred MFCC onto top-3 eigenvectors, normalise by √λ
+		const s = this.outputScale;
+		for (let k = 0; k < 3; k++) {
+			let dot = 0;
+			const base = k * D;
+			for (let i = 0; i < D; i++) dot += this.V[base + i] * this.centered[i];
+			const scale = this.sqrtLambda[k] > 0.001 ? s / this.sqrtLambda[k] : s;
+			out[k] = dot * scale;
+		}
+	}
+
+	/**
+	 * Deflated power iteration for the top 3 eigenvectors of `this.cov`.
+	 * Warm-starts from current eigenvectors so 25 iterations converge well
+	 * for a 13×13 symmetric PD matrix.
+	 */
+	private _computeEigenvectors(): void {
+		const D = this.D;
+		const nIter = 25;
+		const lambda = [0, 0, 0];
+
+		// Work on a copy to avoid half-updated state during projection
+		this._Vwork.set(this.V);
+
+		for (let k = 0; k < 3; k++) {
+			const vk = this._Vwork.subarray(k * D, (k + 1) * D);
+
+			for (let iter = 0; iter < nIter; iter++) {
+				// _buf = C * vk
+				for (let i = 0; i < D; i++) {
+					let sum = 0;
+					const row = i * D;
+					for (let j = 0; j < D; j++) sum += this.cov[row + j] * vk[j];
+					this._buf[i] = sum;
+				}
+
+				// Gram-Schmidt deflation: remove projections onto already-found PCs
+				for (let prev = 0; prev < k; prev++) {
+					const vp = this._Vwork.subarray(prev * D, (prev + 1) * D);
+					let dot = 0;
+					for (let i = 0; i < D; i++) dot += this._buf[i] * vp[i];
+					for (let i = 0; i < D; i++) this._buf[i] -= dot * vp[i];
+				}
+
+				// Normalise in-place
+				let norm = 0;
+				for (let i = 0; i < D; i++) norm += this._buf[i] * this._buf[i];
+				norm = Math.sqrt(norm);
+				if (norm > 1e-10) {
+					const inv = 1 / norm;
+					for (let i = 0; i < D; i++) vk[i] = this._buf[i] * inv;
+				}
+			}
+
+			// Rayleigh quotient → eigenvalue: λ = vk^T C vk
+			for (let i = 0; i < D; i++) {
+				let Cv = 0;
+				const row = i * D;
+				for (let j = 0; j < D; j++) Cv += this.cov[row + j] * vk[j];
+				this._buf[i] = Cv;
+			}
+			let lam = 0;
+			for (let i = 0; i < D; i++) lam += vk[i] * this._buf[i];
+			lambda[k] = lam;
+
+			// Sign-stabilise: keep the same orientation as before to avoid
+			// sudden trajectory flips when the covariance shifts slightly.
+			const vkPrev = this.V.subarray(k * D, (k + 1) * D);
+			let dot = 0;
+			for (let i = 0; i < D; i++) dot += vkPrev[i] * vk[i];
+			if (dot < 0) for (let i = 0; i < D; i++) vk[i] = -vk[i];
+		}
+
+		// Commit
+		this.V.set(this._Vwork);
+		for (let k = 0; k < 3; k++) {
+			this.sqrtLambda[k] = Math.sqrt(Math.max(lambda[k], 1e-6));
+		}
 	}
 
 	reset(): void {
-		for (const s of this.stats) s.reset();
+		this.mean.fill(0);
+		this.cov.fill(0);
+		this.frameCount = 0;
+		for (let k = 0; k < 3; k++) {
+			this.V.fill(0, k * this.D, (k + 1) * this.D);
+			this.V[k * this.D + k] = 1.0;
+		}
+		this.sqrtLambda.fill(1.0);
 	}
 }

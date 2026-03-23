@@ -34,6 +34,13 @@ export class MelFeatureExtractor {
 	readonly logMelEnergies: Float32Array;          // log mel energies
 	readonly mfccs: Float32Array;                   // MFCC coefficients
 
+	/** Amplitude floor in dB — bins below this are zeroed. -100 = off. */
+	floorDb = -100;
+	/** Low-frequency cutoff in Hz (bandpass). 0 = off. */
+	minFreqHz = 0;
+	/** High-frequency cutoff in Hz (bandpass). Infinity = off. */
+	maxFreqHz = Infinity;
+
 	// Scalar features computed each frame
 	centroid = 0;       // spectral centroid (Hz)
 	rms = 0;            // RMS energy
@@ -114,11 +121,19 @@ export class MelFeatureExtractor {
 	compute(freqData: Float32Array, timeData: Float32Array): void {
 		const numBins = this.numBins;
 
-		// ── Convert dB to linear power ───────────────────────
+		// ── Convert dB to linear power + floor/bandpass ──────
 		// AnalyserNode returns dB (typically -100 to -10).
-		// power = 10^(dB / 10)
+		// Fused loop: dB threshold + bandpass + power conversion.
+		const binHz = this.sampleRate / this.fftSize;
+		const minBin = Math.max(0, Math.floor(this.minFreqHz / binHz));
+		const maxBin = Math.min(numBins - 1, Math.ceil(this.maxFreqHz / binHz));
+		const floorDb = this.floorDb;
 		for (let k = 0; k < numBins; k++) {
-			this.powerBuf[k] = Math.pow(10, freqData[k] / 10);
+			if (k < minBin || k > maxBin || freqData[k] < floorDb) {
+				this.powerBuf[k] = 0;
+			} else {
+				this.powerBuf[k] = Math.pow(10, freqData[k] / 10);
+			}
 		}
 
 		// ── Mel filterbank ───────────────────────────────────

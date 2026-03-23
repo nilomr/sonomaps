@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { AudioSource } from '$lib/audio/audio-source.js';
 	import { MelFeatureExtractor } from '$lib/dsp/mel.js';
-	import { DirectFeatureEmbedding, FEATURES, getFeature } from '$lib/embedding/pca.js';
+	import { OnlinePCAEmbedding } from '$lib/embedding/pca.js';
 	import { EmbeddingSmoother } from '$lib/embedding/smoother.js';
 	import { PointCloudRenderer } from '$lib/render/point-cloud.js';
 	import { MelCloudRenderer } from '$lib/render/mel-cloud.js';
@@ -29,7 +29,7 @@
 	// ── Audio pipeline (not reactive) ─────────────────────
 	let audioSource: AudioSource | null = null;
 	let melExtractor: MelFeatureExtractor | null = null;
-	let embedding: DirectFeatureEmbedding | null = null;
+	let embedding: OnlinePCAEmbedding | null = null;
 	let smoother: EmbeddingSmoother | null = null;
 
 	let processing = false;
@@ -44,25 +44,16 @@
 	let status = $state('READY');
 	let volume = $state(1.0);
 	let noiseThreshold = $state(1.8);
+	let floorDb = $state(-100);
+	let freqLo = $state(0);
+	let freqHi = $state(20000);
 
 	// ── Fixed parameters ─────────────────────────────────
-	const smoothing = 0.35;
+	const smoothing = 0.58;
 	const outputDim = 3;
 
-	// ── Axis mapping (user-configurable) ─────────────────
-	let axisX = $state('centroid');
-	let axisY = $state('bandwidth');
-	let axisZ = $state('zcr');
-
-	function onAxesChange() {
-		if (embedding) {
-			embedding.setAxes([axisX, axisY, axisZ]);
-		}
-		if (smoother) {
-			smoother.reset();
-		}
-		pointCloud?.clear();
-	}
+	// ── PCA calibration state ────────────────────────────
+	let pcaCalibrating = $state(false);
 
 	// ── Feature display state (updated ~10Hz) ─────────────
 	let featCentroid = $state('—');
@@ -79,12 +70,34 @@
 	let barRol = $state(0);
 
 	// ── Radar trail history ──────────────────────────────
-	const RADAR_TRAIL_LENGTH = 15;
+	const RADAR_TRAIL_LENGTH = 12;
 	let radarSnapshots: number[][] = [];
 
+	// ── Radar smooth animation state ─────────────────────
+	const radarSmooth = new Float64Array(6); // smoothed bar values (0–1)
+	const RADAR_LERP = 0.18; // interpolation speed per frame
+
+	// ── Radar static grid cache ──────────────────────────
+	let radarGridCanvas: OffscreenCanvas | null = null;
+	let radarGridW = 0;
+	let radarGridH = 0;
+
+	// Pre-computed trig for 6 radar axes
+	const RADAR_N = 6;
+	const RADAR_STEP = (Math.PI * 2) / RADAR_N;
+	const RADAR_START = -Math.PI / 2;
+	const radarCos = new Float64Array(RADAR_N);
+	const radarSin = new Float64Array(RADAR_N);
+	for (let i = 0; i < RADAR_N; i++) {
+		const a = RADAR_START + i * RADAR_STEP;
+		radarCos[i] = Math.cos(a);
+		radarSin[i] = Math.sin(a);
+	}
+	const RADAR_LABELS = ['Centroid', 'Energy', 'Crossings', 'Tonality', 'Spread', 'Rolloff'];
+
 	const FFT_SIZE = 2048;
-	const NUM_MEL_BANDS = 80;
-	const MAX_POINTS = 4000;
+	const NUM_MEL_BANDS = 124;
+	const MAX_POINTS = 10000;
 	const SAMPLE_INTERVAL_MS = 4;
 	const MIN_GATE = 0.0005;
 
@@ -184,7 +197,13 @@
 		isAboveGate = rms >= gate;
 		if (!isAboveGate) return;
 
+		// Skip noise-like frames: high spectral flatness = broadband noise
+		// Only plot frames with tonal/structured content (flatness < 0.4)
+		if (melExtractor.flatness > 0.4) return;
+
 		embedding.projectFromExtractor(melExtractor, embeddingBuf);
+		pcaCalibrating = embedding.isWarmingUp;
+		if (pcaCalibrating) return;
 		smoother.smooth(embeddingBuf);
 
 		const logRms = Math.log1p(rms * 1000);
@@ -229,7 +248,57 @@
 		}
 	}
 
-	// ── Radar chart rendering ───────────────────────────
+	// ── Radar: build static grid offscreen ──────────────
+	function buildRadarGrid(w: number, h: number): void {
+		radarGridW = w;
+		radarGridH = h;
+		const dpr = window.devicePixelRatio || 1;
+		radarGridCanvas = new OffscreenCanvas(Math.round(w * dpr), Math.round(h * dpr));
+		const g = radarGridCanvas.getContext('2d')!;
+		g.scale(dpr, dpr);
+
+		const cx = w / 2;
+		const cy = h / 2;
+		const radius = Math.min(w, h) * 0.30;
+
+		// Concentric rings
+		for (let ring = 1; ring <= 3; ring++) {
+			const r = radius * (ring / 3);
+			g.strokeStyle = ring === 3 ? 'rgba(42,42,50,0.14)' : 'rgba(42,42,50,0.06)';
+			g.lineWidth = 0.5;
+			g.beginPath();
+			for (let i = 0; i <= RADAR_N; i++) {
+				const idx = i % RADAR_N;
+				const x = cx + radarCos[idx] * r;
+				const y = cy + radarSin[idx] * r;
+				if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+			}
+			g.closePath();
+			g.stroke();
+		}
+
+		// Axis lines
+		g.strokeStyle = 'rgba(42,42,50,0.1)';
+		g.lineWidth = 0.5;
+		for (let i = 0; i < RADAR_N; i++) {
+			g.beginPath();
+			g.moveTo(cx, cy);
+			g.lineTo(cx + radarCos[i] * radius, cy + radarSin[i] * radius);
+			g.stroke();
+		}
+
+		// Labels (static part — feature names)
+		g.textAlign = 'center';
+		g.textBaseline = 'middle';
+		g.fillStyle = 'rgba(42,42,50,0.38)';
+		g.font = '500 9px "JetBrains Mono"';
+		const lr = radius + 22;
+		for (let i = 0; i < RADAR_N; i++) {
+			g.fillText(RADAR_LABELS[i], cx + radarCos[i] * lr, cy + radarSin[i] * lr - 6);
+		}
+	}
+
+	// ── Radar chart rendering (optimized) ────────────────
 	function renderRadar(): void {
 		if (!radarCtx || !radarCanvas) return;
 		resizeHiDPI(radarCanvas, radarCtx);
@@ -238,133 +307,82 @@
 		const h = radarCanvas.clientHeight;
 		if (w === 0 || h === 0) return;
 
-		radarCtx.clearRect(0, 0, w, h);
+		// Rebuild static grid cache on size change
+		if (w !== radarGridW || h !== radarGridH) buildRadarGrid(w, h);
 
 		const cx = w / 2;
 		const cy = h / 2;
 		const radius = Math.min(w, h) * 0.30;
 
-		const features = [
-			{ label: 'Centroid', val: featCentroid, bar: barCentroid / 100 },
-			{ label: 'Energy', val: featRms, bar: barRms / 100 },
-			{ label: 'Crossings', val: featZcr, bar: barZcr / 100 },
-			{ label: 'Tonality', val: featFlat, bar: barFlat / 100 },
-			{ label: 'Spread', val: featBw, bar: barBw / 100 },
-			{ label: 'Rolloff', val: featRol, bar: barRol / 100 }
+		// Target bar values
+		const targets = [
+			barCentroid / 100, barRms / 100, barZcr / 100,
+			barFlat / 100, barBw / 100, barRol / 100
 		];
+		const vals = [featCentroid, featRms, featZcr, featFlat, featBw, featRol];
 
-		const n = features.length;
-		const step = (Math.PI * 2) / n;
-		const start = -Math.PI / 2;
-
-		// Concentric rings
-		for (let ring = 1; ring <= 3; ring++) {
-			const r = radius * (ring / 3);
-			radarCtx.strokeStyle = ring === 3 ? 'rgba(42,42,50,0.14)' : 'rgba(42,42,50,0.06)';
-			radarCtx.lineWidth = 0.5;
-			radarCtx.beginPath();
-			for (let i = 0; i <= n; i++) {
-				const a = start + (i % n) * step;
-				const x = cx + Math.cos(a) * r;
-				const y = cy + Math.sin(a) * r;
-				if (i === 0) radarCtx.moveTo(x, y);
-				else radarCtx.lineTo(x, y);
-			}
-			radarCtx.closePath();
-			radarCtx.stroke();
+		// Smooth interpolation every frame
+		for (let i = 0; i < RADAR_N; i++) {
+			radarSmooth[i] += (targets[i] - radarSmooth[i]) * RADAR_LERP;
 		}
 
-		// Axis lines
-		radarCtx.strokeStyle = 'rgba(42,42,50,0.1)';
-		radarCtx.lineWidth = 0.5;
-		for (let i = 0; i < n; i++) {
-			const a = start + i * step;
-			radarCtx.beginPath();
-			radarCtx.moveTo(cx, cy);
-			radarCtx.lineTo(cx + Math.cos(a) * radius, cy + Math.sin(a) * radius);
-			radarCtx.stroke();
-		}
+		// Clear and stamp cached grid
+		radarCtx.clearRect(0, 0, w, h);
+		if (radarGridCanvas) radarCtx.drawImage(radarGridCanvas, 0, 0, w, h);
 
-		// ── Trail polygons (oldest first) ───────────────
-		for (let t = 0; t < radarSnapshots.length; t++) {
+		// ── Trail polygons (batched: single path per trail) ──
+		const sLen = radarSnapshots.length;
+		for (let t = 0; t < sLen; t++) {
 			const snap = radarSnapshots[t];
-			const trailAge = (radarSnapshots.length - t) / (radarSnapshots.length + 1);
-			const trailAlpha = Math.max(0.008, (1 - trailAge * trailAge) * 0.08);
+			const age = (sLen - t) / (sLen + 1);
+			const alpha = Math.max(0.008, (1 - age * age) * 0.08);
 
-			radarCtx.fillStyle = `rgba(42,42,50,${trailAlpha.toFixed(4)})`;
+			radarCtx.fillStyle = `rgba(42,42,50,${alpha.toFixed(3)})`;
 			radarCtx.beginPath();
-			for (let i = 0; i <= n; i++) {
-				const idx = i % n;
-				const a = start + idx * step;
-				const r = radius * Math.max(0.03, snap[idx]);
-				const x = cx + Math.cos(a) * r;
-				const y = cy + Math.sin(a) * r;
-				if (i === 0) radarCtx.moveTo(x, y);
-				else radarCtx.lineTo(x, y);
+			for (let i = 0; i <= RADAR_N; i++) {
+				const idx = i % RADAR_N;
+				const rv = radius * Math.max(0.03, snap[idx]);
+				const x = cx + radarCos[idx] * rv;
+				const y = cy + radarSin[idx] * rv;
+				if (i === 0) radarCtx.moveTo(x, y); else radarCtx.lineTo(x, y);
 			}
 			radarCtx.closePath();
 			radarCtx.fill();
 		}
 
-		// ── Current polygon — fill ──────────────────────
-		radarCtx.fillStyle = 'rgba(42,42,50,0.045)';
+		// ── Current polygon (fill + stroke in one path build) ──
 		radarCtx.beginPath();
-		for (let i = 0; i <= n; i++) {
-			const idx = i % n;
-			const a = start + idx * step;
-			const r = radius * Math.max(0.03, features[idx].bar);
-			const x = cx + Math.cos(a) * r;
-			const y = cy + Math.sin(a) * r;
-			if (i === 0) radarCtx.moveTo(x, y);
-			else radarCtx.lineTo(x, y);
+		for (let i = 0; i <= RADAR_N; i++) {
+			const idx = i % RADAR_N;
+			const rv = radius * Math.max(0.03, radarSmooth[idx]);
+			const x = cx + radarCos[idx] * rv;
+			const y = cy + radarSin[idx] * rv;
+			if (i === 0) radarCtx.moveTo(x, y); else radarCtx.lineTo(x, y);
 		}
 		radarCtx.closePath();
+		radarCtx.fillStyle = 'rgba(42,42,50,0.045)';
 		radarCtx.fill();
-
-		// ── Current polygon — stroke ────────────────────
 		radarCtx.strokeStyle = 'rgba(42,42,50,0.38)';
 		radarCtx.lineWidth = 1.5;
-		radarCtx.beginPath();
-		for (let i = 0; i <= n; i++) {
-			const idx = i % n;
-			const a = start + idx * step;
-			const r = radius * Math.max(0.03, features[idx].bar);
-			const x = cx + Math.cos(a) * r;
-			const y = cy + Math.sin(a) * r;
-			if (i === 0) radarCtx.moveTo(x, y);
-			else radarCtx.lineTo(x, y);
-		}
-		radarCtx.closePath();
 		radarCtx.stroke();
 
-		// Vertex dots
-		for (let i = 0; i < n; i++) {
-			const a = start + i * step;
-			const r = radius * Math.max(0.03, features[i].bar);
-			const x = cx + Math.cos(a) * r;
-			const y = cy + Math.sin(a) * r;
-			radarCtx.fillStyle = 'rgba(42,42,50,0.5)';
+		// Vertex dots (single fillStyle, batch arcs)
+		radarCtx.fillStyle = 'rgba(42,42,50,0.5)';
+		for (let i = 0; i < RADAR_N; i++) {
+			const rv = radius * Math.max(0.03, radarSmooth[i]);
 			radarCtx.beginPath();
-			radarCtx.arc(x, y, 2.5, 0, Math.PI * 2);
+			radarCtx.arc(cx + radarCos[i] * rv, cy + radarSin[i] * rv, 2.5, 0, Math.PI * 2);
 			radarCtx.fill();
 		}
 
-		// Labels
-		for (let i = 0; i < n; i++) {
-			const a = start + i * step;
-			const lr = radius + 22;
-			const x = cx + Math.cos(a) * lr;
-			const y = cy + Math.sin(a) * lr;
-
-			radarCtx.fillStyle = 'rgba(42,42,50,0.38)';
-			radarCtx.font = '500 9px "JetBrains Mono"';
-			radarCtx.textAlign = 'center';
-			radarCtx.textBaseline = 'middle';
-			radarCtx.fillText(features[i].label, x, y - 6);
-
-			radarCtx.fillStyle = 'rgba(42,42,50,0.58)';
-			radarCtx.font = '400 10px "JetBrains Mono"';
-			radarCtx.fillText(features[i].val, x, y + 7);
+		// Value labels (dynamic — update every frame for smooth text)
+		radarCtx.textAlign = 'center';
+		radarCtx.textBaseline = 'middle';
+		radarCtx.fillStyle = 'rgba(42,42,50,0.58)';
+		radarCtx.font = '400 10px "JetBrains Mono"';
+		const lr = radius + 22;
+		for (let i = 0; i < RADAR_N; i++) {
+			radarCtx.fillText(vals[i], cx + radarCos[i] * lr, cy + radarSin[i] * lr + 7);
 		}
 	}
 
@@ -373,7 +391,7 @@
 		radarCtx = radarCanvas.getContext('2d');
 
 		melCloud = new MelCloudRenderer(melCanvas, {
-			maxFrames: 250,
+			maxFrames: 400,
 			numBands: NUM_MEL_BANDS
 		});
 
@@ -384,7 +402,7 @@
 		pointCloud = new PointCloudRenderer(pointCanvas, {
 			maxPoints: MAX_POINTS,
 			outputDim,
-			pointSize: 1.8
+			pointSize: 1.6
 		});
 
 		const onResize = () => {
@@ -407,10 +425,10 @@
 			// Oscilloscope + pitch gauge
 			if (processing && audioSource) {
 				scope?.draw(audioSource.timeData);
-				pitchGauge?.draw(melExtractor?.peakFreq ?? 0);
+				pitchGauge?.draw(melExtractor?.peakFreq ?? 0, melExtractor?.rms ?? 0);
 			} else {
 				scope?.draw(new Float32Array(0));
-				pitchGauge?.draw(0);
+				pitchGauge?.draw(0, 0);
 			}
 
 			featCounter++;
@@ -487,8 +505,11 @@
 				numMelBands: NUM_MEL_BANDS,
 				numMfccs: 13
 			});
+			melExtractor.floorDb = floorDb;
+			melExtractor.minFreqHz = freqLo;
+			melExtractor.maxFreqHz = freqHi;
 
-			embedding = new DirectFeatureEmbedding([axisX, axisY, axisZ]);
+			embedding = new OnlinePCAEmbedding();
 			smoother = new EmbeddingSmoother(outputDim, smoothing);
 
 			energyEma = 0; energyVar = 0.01;
@@ -542,6 +563,13 @@
 	function onVolumeInput() {
 		audioSource?.setVolume(volume);
 	}
+
+	function onFilterChange() {
+		if (!melExtractor) return;
+		melExtractor.floorDb = floorDb;
+		melExtractor.minFreqHz = freqLo;
+		melExtractor.maxFreqHz = freqHi;
+	}
 </script>
 
 <svelte:head>
@@ -568,11 +596,15 @@
 		<canvas bind:this={pointCanvas}></canvas>
 		<span class="panel-label">TRAJECTORY</span>
 		<div class="axes-overlay">
-			<span class="ax-key">X</span> {getFeature(axisX).axisLabel}
-			<span class="ax-sep">/</span>
-			<span class="ax-key">Y</span> {getFeature(axisY).axisLabel}
-			<span class="ax-sep">/</span>
-			<span class="ax-key">Z</span> {getFeature(axisZ).axisLabel}
+			{#if isRunning && pcaCalibrating}
+				CALIBRATING
+			{:else}
+				<span class="ax-key">X</span> PC1
+				<span class="ax-sep">/</span>
+				<span class="ax-key">Y</span> PC2
+				<span class="ax-sep">/</span>
+				<span class="ax-key">Z</span> PC3
+			{/if}
 		</div>
 	</section>
 
@@ -602,6 +634,9 @@
 			</div>
 			<span class="status-badge" class:active={isRunning}>{status}</span>
 		</div>
+		<!-- Credit: absolutely positioned so it doesn't affect flex baseline -->
+		<a class="design-credit" href="https://sedum.studio" target="_blank"
+			rel="noopener noreferrer">designed by <span>sedum.studio</span></a>
 
 		<div class="ctrl-sep"></div>
 
@@ -635,51 +670,56 @@
 
 		<div class="ctrl-sep"></div>
 
-		<!-- Projection axes -->
-		<div class="ctrl-section">
-			<span class="section-label">PROJECTION</span>
-			<div class="section-body axes-body">
-				<div class="axis-sel">
-					<span class="ax-tag">X</span>
-					<select bind:value={axisX} onchange={onAxesChange}>
-						{#each FEATURES as f}<option value={f.id}>{f.label}</option>{/each}
-					</select>
-				</div>
-				<div class="axis-sel">
-					<span class="ax-tag">Y</span>
-					<select bind:value={axisY} onchange={onAxesChange}>
-						{#each FEATURES as f}<option value={f.id}>{f.label}</option>{/each}
-					</select>
-				</div>
-				<div class="axis-sel">
-					<span class="ax-tag">Z</span>
-					<select bind:value={axisZ} onchange={onAxesChange}>
-						{#each FEATURES as f}<option value={f.id}>{f.label}</option>{/each}
-					</select>
-				</div>
-			</div>
-		</div>
-
-		<div class="ctrl-sep"></div>
-
 		<!-- Parameters -->
 		<div class="ctrl-section grow">
 			<span class="section-label">PARAMETERS</span>
 			<div class="section-body params-body">
 				<div class="param">
 					<span class="param-label">VOL</span>
-					<input type="range" class="slider" min="0" max="2" step="0.01"
-						bind:value={volume} oninput={onVolumeInput} />
+					<div class="param-wheel">
+						<input type="range" class="wheel-slider" min="0" max="2" step="0.01"
+							bind:value={volume} oninput={onVolumeInput} />
+					</div>
+					<span class="param-readout">{volume.toFixed(2)}</span>
 				</div>
-				<div class="param">
-					<span class="param-label">GATE</span>
-					<input type="range" class="slider" min="0.5" max="5" step="0.1"
-						bind:value={noiseThreshold} />
+				<div class="filter-group">
+					<div class="filter-sel">
+						<span class="param-label">FLOOR</span>
+						<select bind:value={floorDb} onchange={onFilterChange}>
+							<option value={-100}>OFF</option>
+							<option value={-80}>-80 dB</option>
+							<option value={-70}>-70 dB</option>
+							<option value={-60}>-60 dB</option>
+							<option value={-50}>-50 dB</option>
+							<option value={-40}>-40 dB</option>
+						</select>
+					</div>
+					<div class="filter-sel">
+						<span class="param-label">LO</span>
+						<select bind:value={freqLo} onchange={onFilterChange}>
+							<option value={0}>OFF</option>
+							<option value={50}>50</option>
+							<option value={100}>100</option>
+							<option value={200}>200</option>
+							<option value={500}>500</option>
+							<option value={1000}>1k</option>
+							<option value={2000}>2k</option>
+						</select>
+					</div>
+					<div class="filter-sel">
+						<span class="param-label">HI</span>
+						<select bind:value={freqHi} onchange={onFilterChange}>
+							<option value={20000}>OFF</option>
+							<option value={16000}>16k</option>
+							<option value={12000}>12k</option>
+							<option value={8000}>8k</option>
+							<option value={4000}>4k</option>
+							<option value={2000}>2k</option>
+						</select>
+					</div>
 				</div>
 			</div>
 		</div>
-
-		<div class="ctrl-sep"></div>
 
 		<!-- FPS -->
 		<div class="ctrl-fps">
@@ -712,7 +752,7 @@
 			"mel traj radar"
 			"ctrl ctrl ctrl";
 		gap: 1px;
-		background: rgba(42, 42, 50, 0.12);
+		background: rgba(42, 42, 50, 0.18);
 	}
 
 	/* ── Panel base ──────────────────────────────── */
@@ -729,7 +769,7 @@
 		font-size: 10px;
 		font-weight: 500;
 		letter-spacing: 2.5px;
-		color: rgba(42, 42, 50, 0.32);
+		color: rgba(42, 42, 50, 0.42);
 		pointer-events: none;
 		z-index: 2;
 	}
@@ -759,7 +799,7 @@
 	.mel-2d {
 		height: 10%;
 		min-height: 28px;
-		border-top: 1px solid rgba(42, 42, 50, 0.08);
+		border-top: 1px solid rgba(42, 42, 50, 0.14);
 	}
 
 	.mel-2d canvas {
@@ -819,7 +859,7 @@
 	.analysis-pitch {
 		height: 30%;
 		min-height: 80px;
-		border-top: 1px solid rgba(42, 42, 50, 0.08);
+		border-top: 1px solid rgba(42, 42, 50, 0.14);
 		position: relative;
 	}
 
@@ -832,7 +872,7 @@
 	.analysis-scope {
 		height: 22%;
 		min-height: 50px;
-		border-top: 1px solid rgba(42, 42, 50, 0.08);
+		border-top: 1px solid rgba(42, 42, 50, 0.14);
 		position: relative;
 	}
 
@@ -844,23 +884,26 @@
 
 	.panel-label.sub {
 		font-size: 9px;
-		color: rgba(42, 42, 50, 0.2);
+		color: rgba(42, 42, 50, 0.3);
 	}
 
 	/* ── Controls bar ────────────────────────────── */
 	.controls-bar {
+		position: relative;
 		display: flex;
-		align-items: center;
-		padding: 12px 24px 16px;
+		align-items: flex-end;
+		--control-height: 28px;
+		padding: 28px 28px 32px;
 		gap: 0;
 	}
 
 	/* ── Brand ────────────────────────────────────── */
 	.ctrl-brand {
 		display: flex;
-		align-items: center;
-		gap: 16px;
+		align-items: flex-end;
+		gap: 14px;
 		padding-right: 22px;
+		padding-bottom: 15px;
 		flex-shrink: 0;
 	}
 
@@ -868,6 +911,7 @@
 		display: flex;
 		flex-direction: column;
 		line-height: 1.15;
+		margin-bottom:-4px;
 	}
 
 	.brand-top {
@@ -887,43 +931,50 @@
 	/* ── Separator ───────────────────────────────── */
 	.ctrl-sep {
 		width: 1px;
-		height: 48px;
-		background: rgba(42, 42, 50, 0.08);
+		height: 40px;
+		background: rgba(42, 42, 50, 0.10);
 		flex-shrink: 0;
+		align-self: flex-end;
 	}
 
 	/* ── Sections ────────────────────────────────── */
 	.ctrl-section {
 		display: flex;
 		flex-direction: column;
-		gap: 8px;
-		padding: 0 20px;
-		flex-shrink: 0;
+		gap: 6px;
+		padding: 0 18px;
+		min-width: 0;
 	}
 
 	.ctrl-section.grow {
 		flex: 1;
-		min-width: 0;
 	}
 
 	.section-label {
+		display: block;
+		height: 10px;
 		font-size: 9px;
 		font-weight: 500;
 		letter-spacing: 2.5px;
-		color: rgba(42, 42, 50, 0.22);
+		color: rgba(42, 42, 50, 0.28);
 		line-height: 1;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.section-body {
 		display: flex;
-		align-items: center;
+		align-items: flex-end;
 		gap: 8px;
+		flex-wrap: nowrap;
+		min-width: 0;
 	}
 
 	/* ── Play button ─────────────────────────────── */
 	.ctrl-btn.play {
-		width: 36px;
-		height: 36px;
+		width: 30px;
+		height: 30px;
 		padding: 0;
 		border: 1.5px solid rgba(42, 42, 50, 0.18);
 		border-radius: 50%;
@@ -952,15 +1003,15 @@
 		width: 0;
 		height: 0;
 		border-style: solid;
-		border-width: 5px 0 5px 9px;
+		border-width: 4px 0 4px 7px;
 		border-color: transparent transparent transparent rgba(42, 42, 50, 0.5);
 		flex-shrink: 0;
-		margin-left: 2px;
+		margin-left: 1px;
 	}
 
 	.icon-stop {
-		width: 10px;
-		height: 10px;
+		width: 8px;
+		height: 8px;
 		background: rgba(160, 50, 50, 0.5);
 		border-radius: 2px;
 		flex-shrink: 0;
@@ -969,13 +1020,17 @@
 	/* ── Input toggle ────────────────────────────── */
 	.input-toggle {
 		display: flex;
+		height: var(--control-height);
+		box-sizing: border-box;
+		align-items: stretch;
 		border: 1px solid rgba(42, 42, 50, 0.12);
 		border-radius: 4px;
 		overflow: hidden;
 	}
 
 	.toggle-btn {
-		padding: 6px 12px;
+		height: 100%;
+		padding: 0 12px;
 		border: none;
 		background: transparent;
 		color: rgba(42, 42, 50, 0.35);
@@ -983,6 +1038,9 @@
 		font-size: 10px;
 		font-weight: 500;
 		letter-spacing: 2px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 		cursor: pointer;
 		transition: all 0.12s;
 	}
@@ -1007,7 +1065,9 @@
 	}
 
 	.file-btn {
-		padding: 6px 12px;
+		height: var(--control-height);
+		box-sizing: border-box;
+		padding: 0 12px;
 		border: 1px dashed rgba(42, 42, 50, 0.18);
 		border-radius: 4px;
 		background: transparent;
@@ -1016,6 +1076,9 @@
 		font-size: 10px;
 		font-weight: 400;
 		letter-spacing: 1px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
 		cursor: pointer;
 		transition: border-color 0.12s;
 		position: relative;
@@ -1033,26 +1096,147 @@
 		pointer-events: none;
 	}
 
-	/* ── Axis selectors ──────────────────────────── */
-	.axes-body {
-		gap: 10px;
+	/* ── Parameters ──────────────────────────────── */
+	.params-body {
+		gap: 16px;
+		min-width: 0;
 	}
 
-	.axis-sel {
+	.param {
 		display: flex;
 		align-items: center;
-		gap: 5px;
+		gap: 9px;
 	}
 
-	.ax-tag {
+	.param-label {
 		font-size: 10px;
-		font-weight: 600;
-		letter-spacing: 1px;
-		color: rgba(42, 42, 50, 0.45);
+		font-weight: 500;
+		letter-spacing: 2px;
+		color: rgba(42, 42, 50, 0.38);
+		white-space: nowrap;
 	}
 
-	.axis-sel select {
-		padding: 4px 6px;
+	.param-wheel {
+		position: relative;
+		width: 120px;
+		min-width: 60px;
+		height: 24px;
+		display: flex;
+		align-items: center;
+		flex-shrink: 1;
+	}
+
+	.param-wheel::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: 50%;
+		height: 14px;
+		transform: translateY(-50%);
+		background: repeating-linear-gradient(
+			to right,
+			rgba(42, 42, 50, 0.22) 0px,
+			rgba(42, 42, 50, 0.22) 1px,
+			transparent 1px,
+			transparent 8px
+		);
+		opacity: 0.8;
+		pointer-events: none;
+	}
+
+	.param-wheel::after {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: 50%;
+		height: 1px;
+		transform: translateY(-50%);
+		background: rgba(42, 42, 50, 0.1);
+		pointer-events: none;
+	}
+
+	.wheel-slider {
+		-webkit-appearance: none;
+		appearance: none;
+		width: 100%;
+		height: 24px;
+		background: transparent;
+		border-radius: 0;
+		outline: none;
+		cursor: pointer;
+		position: relative;
+		z-index: 1;
+	}
+
+	.wheel-slider::-webkit-slider-runnable-track {
+		height: 24px;
+		background: transparent;
+	}
+
+	.wheel-slider::-webkit-slider-thumb {
+		-webkit-appearance: none;
+		width: 2px;
+		height: 20px;
+		margin-top: 2px;
+		border-radius: 1px;
+		background: rgba(42, 42, 50, 0.55);
+		border: none;
+		cursor: pointer;
+		transition: background 0.12s;
+	}
+
+	.wheel-slider::-webkit-slider-thumb:hover {
+		background: rgba(42, 42, 50, 0.75);
+	}
+
+	.wheel-slider::-moz-range-track {
+		height: 24px;
+		background: transparent;
+	}
+
+	.wheel-slider::-moz-range-thumb {
+		width: 2px;
+		height: 20px;
+		border-radius: 1px;
+		background: rgba(42, 42, 50, 0.55);
+		border: none;
+		cursor: pointer;
+	}
+
+	.param-readout {
+		width: 32px;
+		font-size: 10px;
+		font-weight: 400;
+		letter-spacing: 1px;
+		text-align: right;
+		color: rgba(42, 42, 50, 0.34);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* ── Filter selects ─────────────────────────── */
+	.filter-group {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-left: 8px;
+		padding-left: 12px;
+		border-left: 1px solid rgba(42, 42, 50, 0.08);
+		flex-shrink: 1;
+		min-width: 0;
+	}
+
+	.filter-sel {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+
+	.filter-sel select {
+		height: var(--control-height);
+		box-sizing: border-box;
+		padding: 0 5px;
 		border: 1px solid rgba(42, 42, 50, 0.1);
 		border-radius: 3px;
 		background: transparent;
@@ -1060,82 +1244,29 @@
 		font-family: inherit;
 		font-size: 10px;
 		font-weight: 400;
-		letter-spacing: 0.3px;
 		cursor: pointer;
 		outline: none;
 		transition: border-color 0.12s;
 	}
 
-	.axis-sel select:hover { border-color: rgba(42, 42, 50, 0.22); }
-	.axis-sel select:focus { border-color: rgba(42, 42, 50, 0.3); }
-
-	/* ── Parameters ──────────────────────────────── */
-	.params-body {
-		gap: 20px;
-	}
-
-	.param {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-	}
-
-	.param-label {
-		font-size: 10px;
-		font-weight: 500;
-		letter-spacing: 2px;
-		color: rgba(42, 42, 50, 0.32);
-		white-space: nowrap;
-	}
-
-	.slider {
-		-webkit-appearance: none;
-		appearance: none;
-		width: 110px;
-		height: 2px;
-		background: rgba(42, 42, 50, 0.12);
-		border-radius: 1px;
-		outline: none;
-		cursor: pointer;
-	}
-
-	.slider::-webkit-slider-thumb {
-		-webkit-appearance: none;
-		width: 12px;
-		height: 12px;
-		border-radius: 50%;
-		background: #f2ede4;
-		border: 1.5px solid rgba(42, 42, 50, 0.3);
-		cursor: pointer;
-		transition: border-color 0.12s;
-	}
-
-	.slider::-webkit-slider-thumb:hover {
-		border-color: rgba(42, 42, 50, 0.5);
-	}
-
-	.slider::-moz-range-thumb {
-		width: 12px;
-		height: 12px;
-		border-radius: 50%;
-		background: #f2ede4;
-		border: 1.5px solid rgba(42, 42, 50, 0.3);
-		cursor: pointer;
-	}
+	.filter-sel select:hover { border-color: rgba(42, 42, 50, 0.22); }
+	.filter-sel select:focus { border-color: rgba(42, 42, 50, 0.3); }
 
 	/* ── FPS ──────────────────────────────────────── */
 	.ctrl-fps {
 		display: flex;
-		flex-direction: column;
-		align-items: center;
-		padding-left: 20px;
+		align-items: baseline;
+		gap: 4px;
+		margin-left: auto;
+		padding-left: 16px;
 		flex-shrink: 0;
+		align-self: flex-end;
 	}
 
 	.fps-number {
-		font-size: 16px;
+		font-size: 14px;
 		font-weight: 300;
-		color: rgba(42, 42, 50, 0.3);
+		color: rgba(42, 42, 50, 0.30);
 		font-variant-numeric: tabular-nums;
 		line-height: 1;
 	}
@@ -1144,8 +1275,7 @@
 		font-size: 8px;
 		font-weight: 500;
 		letter-spacing: 2px;
-		color: rgba(42, 42, 50, 0.18);
-		margin-top: 2px;
+		color: rgba(42, 42, 50, 0.20);
 	}
 
 	/* ── Status badge ────────────────────────────── */
@@ -1169,5 +1299,48 @@
 	.status-badge.active {
 		color: rgba(160, 50, 50, 0.7);
 		border-color: rgba(160, 50, 50, 0.25);
+	}
+
+	.design-credit {
+		position: absolute;
+		bottom: 29px;
+		left: 28px;
+		font-size: 9px;
+		font-weight: 600;
+		letter-spacing: 0.35px;
+		color: rgba(34, 34, 41, 0.25);
+		text-decoration: none;
+		text-transform: lowercase;
+		transition: color 0.15s ease;
+		white-space: nowrap;
+	}
+
+	.design-credit span {
+		font-weight: 800;
+		letter-spacing: 1.2px;
+		border-bottom: 1px solid rgba(42, 42, 50, 0.18);
+		padding-bottom: 1px;
+	}
+
+	.design-credit:hover {
+		color: rgba(42, 42, 50, 0.45);
+	}
+
+	/* ── Responsive ──────────────────────────────── */
+	@media (max-width: 1200px) {
+		.ctrl-section { padding: 0 12px; }
+		.ctrl-brand { padding-right: 14px; }
+		.param-wheel { width: 90px; }
+		.filter-group { gap: 6px; padding-left: 8px; margin-left: 4px; }
+	}
+
+	@media (max-width: 960px) {
+		.controls-bar { padding: 10px 16px 28px; }
+		.ctrl-section { padding: 0 8px; }
+		.param-wheel { width: 70px; }
+		.filter-group { display: none; }
+		.ctrl-brand { gap: 8px; }
+		.brand-top, .brand-bottom { font-size: 13px; letter-spacing: 4px; }
+		.design-credit { left: 16px; bottom: 8px; }
 	}
 </style>

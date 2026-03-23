@@ -1,9 +1,15 @@
 /**
  * Shaders for the audio point cloud.
  *
- * Aesthetic: dark, precise points on light cream background.
- * Monochrome with subtle tonal variation from spectral centroid.
+ * Aesthetic: dark ink on light cream. Trail is the primary visual — recent
+ * segments are dense and dark, older history fades gracefully. Loud sound
+ * leaves a darker mark; silence disappears entirely. Spectral centroid adds
+ * a warm/cool tonal shift across the monochrome palette.
  */
+
+// ── Head indicator ────────────────────────────────────────
+// Scatter points show only the most recent ~0.4 s of trajectory.
+// They act as a cursor: a soft glowing cloud at the leading edge of the trail.
 
 export const pointVertexShader = /* glsl */ `
   attribute float aAge;
@@ -18,20 +24,18 @@ export const pointVertexShader = /* glsl */ `
   uniform float uPixelRatio;
 
   void main() {
-    vAge = aAge;
-    vEnergy = aEnergy;
+    vAge      = aAge;
+    vEnergy   = aEnergy;
     vCentroid = aCentroid;
 
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
 
-    float alive = max(0.0, 1.0 - vAge);
-    // Quiet points shrink aggressively: energy 0 → 0.08x, energy 1 → 1.6x
-    float energyScale = 0.08 + vEnergy * 1.52;
+    // Only the freshest ~0.4 s (age < 0.08 with ageStep = 1/300)
+    float fresh = max(0.0, 1.0 - vAge / 0.08);
+    float energyScale = 0.14 + pow(clamp(vEnergy, 0.0, 1.0), 1.25) * 1.9;
 
-    gl_PointSize = uPointSize * uPixelRatio * energyScale * alive
-                   * (120.0 / max(-mvPosition.z, 0.1));
-
-    gl_Position = projectionMatrix * mvPosition;
+    gl_PointSize = uPointSize * uPixelRatio * energyScale * fresh * 7.4;
+    gl_Position  = projectionMatrix * mvPosition;
   }
 `;
 
@@ -41,37 +45,30 @@ export const pointFragmentShader = /* glsl */ `
   varying float vCentroid;
 
   vec3 palette(float t) {
-    // Dark monochrome with subtle cool/warm shift
-    // Low centroid (dark sounds): warm charcoal
-    // High centroid (bright sounds): cool dark blue
-    vec3 warm = vec3(0.12, 0.11, 0.10);  // warm charcoal
-    vec3 mid  = vec3(0.08, 0.10, 0.14);  // neutral dark
-    vec3 cool = vec3(0.06, 0.10, 0.18);  // cool dark blue
-
-    vec3 c = mix(warm, mid, smoothstep(0.0, 0.45, t));
-    return mix(c, cool, smoothstep(0.35, 1.0, t));
+    vec3 warm = vec3(0.17, 0.12, 0.09);
+    vec3 cool = vec3(0.06, 0.10, 0.20);
+    return mix(warm, cool, smoothstep(0.0, 1.0, t));
   }
 
   void main() {
     vec2 coord = gl_PointCoord - 0.5;
-    float r2 = dot(coord, coord);
-    if (r2 > 0.25) discard;
+    float r = length(coord) * 2.0;
+    if (r > 1.0) discard;
+
+    float fresh       = max(0.0, 1.0 - vAge / 0.08);
+    float energyGate  = smoothstep(0.12, 0.70, vEnergy);
 
     vec3 color = palette(vCentroid);
-
-    // Energy darkens the point (more energy = more opaque/dark)
-    color *= 1.1 - vEnergy * 0.3;
-
-    float alive = max(0.0, 1.0 - vAge);
-    // Quiet points fade out: energy 0 → nearly invisible
-    float energyAlpha = 0.04 + vEnergy * 0.96;
-    float alpha = alive * alive * 0.85 * energyAlpha;
+    float alpha = fresh * fresh * energyGate * 0.86;
 
     gl_FragColor = vec4(color, alpha);
   }
 `;
 
-// ── Trail line shaders ────────────────────────────────────
+// ── Trail line ────────────────────────────────────────────
+// The trail is the primary visual. Recent = dark and opaque; older history
+// fades with a quadratic curve. Quiet segments vanish so gaps in the sound
+// read as natural breaks in the ink stroke.
 
 export const trailVertexShader = /* glsl */ `
   attribute float aAge;
@@ -83,9 +80,9 @@ export const trailVertexShader = /* glsl */ `
   varying float vEnergy;
 
   void main() {
-    vAge = aAge;
+    vAge      = aAge;
     vCentroid = aCentroid;
-    vEnergy = aEnergy;
+    vEnergy   = aEnergy;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
@@ -96,24 +93,35 @@ export const trailFragmentShader = /* glsl */ `
   varying float vEnergy;
 
   vec3 palette(float t) {
-    vec3 warm = vec3(0.12, 0.11, 0.10);
-    vec3 mid  = vec3(0.08, 0.10, 0.14);
-    vec3 cool = vec3(0.06, 0.10, 0.18);
-    vec3 c = mix(warm, mid, smoothstep(0.0, 0.45, t));
-    return mix(c, cool, smoothstep(0.35, 1.0, t));
+    vec3 warm = vec3(0.17, 0.12, 0.09);
+    vec3 cool = vec3(0.06, 0.10, 0.20);
+    return mix(warm, cool, smoothstep(0.0, 1.0, t));
   }
 
   void main() {
-    vec3 color = palette(vCentroid);
     float alive = max(0.0, 1.0 - vAge);
-    float energyAlpha = 0.04 + vEnergy * 0.96;
-    float alpha = alive * alive * alive * 0.25 * energyAlpha;
+
+    // Quiet segments disappear — loud segments leave a strong mark
+    float energyBoost = smoothstep(0.07, 0.30, vEnergy);
+
+    // Slightly faster than quadratic so the connecting line clears sooner
+    float alpha = pow(alive, 2.6) * 0.68 * energyBoost;
+
+    vec3 color = palette(vCentroid);
+    // Loud = darker ink; quiet = lighter (contrast drives attention to amplitude)
+    color *= 1.0 - vEnergy * 0.25;
 
     gl_FragColor = vec4(color, alpha);
   }
 `;
 
 // ── Mel cloud shaders ─────────────────────────────────────
+//
+// Particles use gaussian soft falloff so overlapping points
+// accumulate into density fields. Patterns emerge from the
+// overlap of many semi-transparent blobs rather than from
+// individual point colours. An energy threshold hides the
+// noise floor entirely.
 
 export const melCloudVertexShader = /* glsl */ `
   attribute float aFrameIndex;
@@ -126,6 +134,8 @@ export const melCloudVertexShader = /* glsl */ `
   uniform float uPixelRatio;
 
   varying float vAlpha;
+  varying float vMelBand;
+  varying float vEnergy;
 
   void main() {
     float age = uCurrentFrame - aFrameIndex;
@@ -135,23 +145,39 @@ export const melCloudVertexShader = /* glsl */ `
       gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
       gl_PointSize = 0.0;
       vAlpha = 0.0;
+      vMelBand = 0.0;
+      vEnergy = 0.0;
       return;
     }
 
-    // X = time (scrolling), Y = mel freq, Z = amplitude
+    vMelBand = aMelBand;
+    vEnergy = aEnergy;
+
+    // X = time (scrolling), Y = mel freq, Z = subtle height
     float xNorm = 1.0 - age / uMaxFrames;
     float x = (xNorm - 0.5) * 8.0;
     float y = (aMelBand - 0.5) * 5.0;
-    float z = aEnergy * 2.5;
+    float z = aEnergy * 1.2;
 
     vec4 mvPosition = modelViewMatrix * vec4(x, y, z, 1.0);
 
-    float ageFade = 1.0 - smoothstep(0.65, 1.0, age / uMaxFrames);
+    // Energy threshold: below ~0.08, fully invisible
+    float visible = smoothstep(0.05, 0.15, aEnergy);
 
-    gl_PointSize = uPointSize * uPixelRatio * ageFade
-                   * (100.0 / max(-mvPosition.z, 0.1));
+    // Age fade (older data fades)
+    float ageFade = 1.0 - smoothstep(0.7, 1.0, age / uMaxFrames);
 
-    vAlpha = (0.04 + aEnergy * 0.6) * ageFade;
+    // Depth cue
+    float depth = clamp((-mvPosition.z - 3.0) / 15.0, 0.0, 1.0);
+
+    // Size: dramatic nonlinear scaling — loud ≈ 25px, threshold ≈ 5px
+    float eSize = 0.5 + pow(aEnergy, 0.8) * 10.0;
+    gl_PointSize = uPointSize * uPixelRatio * visible * ageFade
+                 * eSize * (1.0 - depth * 0.35);
+
+    // Alpha: low per-particle so accumulation creates density
+    vAlpha = visible * ageFade * (0.04 + aEnergy * 0.28)
+           * (1.0 - depth * 0.25);
 
     gl_Position = projectionMatrix * mvPosition;
   }
@@ -159,15 +185,21 @@ export const melCloudVertexShader = /* glsl */ `
 
 export const melCloudFragmentShader = /* glsl */ `
   varying float vAlpha;
+  varying float vMelBand;
+  varying float vEnergy;
 
   void main() {
-    vec2 coord = gl_PointCoord - 0.5;
-    float r2 = dot(coord, coord);
-    if (r2 > 0.25) discard;
+    // Solid disc (no radial gradient)
+    float r = length(gl_PointCoord - 0.5) * 2.0;
+    if (r > 1.0) discard;
 
-    vec3 color = vec3(0.10, 0.10, 0.13);
-    float softEdge = 1.0 - smoothstep(0.15, 0.25, r2);
+    // Dark palette — subtle warm/cool shift by frequency
+    vec3 color = vec3(0.06, 0.07, 0.11);
+    color += (1.0 - vMelBand) * vec3(0.05, 0.01, -0.03);
 
-    gl_FragColor = vec4(color, vAlpha * softEdge);
+    // Energy warms slightly
+    color += vEnergy * vec3(0.04, 0.01, -0.01);
+
+    gl_FragColor = vec4(color, vAlpha);
   }
 `;
