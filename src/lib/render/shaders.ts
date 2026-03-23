@@ -15,10 +15,12 @@ export const pointVertexShader = /* glsl */ `
   attribute float aAge;
   attribute float aEnergy;
   attribute float aCentroid;
+  attribute float aFlux;
 
   varying float vAge;
   varying float vEnergy;
   varying float vCentroid;
+  varying float vFlux;
 
   uniform float uPointSize;
   uniform float uPixelRatio;
@@ -27,14 +29,16 @@ export const pointVertexShader = /* glsl */ `
     vAge      = aAge;
     vEnergy   = aEnergy;
     vCentroid = aCentroid;
+    vFlux     = aFlux;
 
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
 
     // Only the freshest ~0.4 s (age < 0.08 with ageStep = 1/300)
     float fresh = max(0.0, 1.0 - vAge / 0.08);
     float energyScale = 0.14 + pow(clamp(vEnergy, 0.0, 1.0), 1.25) * 1.9;
+    float fluxScale = 0.75 + clamp(vFlux, 0.0, 1.0) * 1.35;
 
-    gl_PointSize = uPointSize * uPixelRatio * energyScale * fresh * 7.4;
+    gl_PointSize = uPointSize * uPixelRatio * energyScale * fluxScale * fresh * 7.4;
     gl_Position  = projectionMatrix * mvPosition;
   }
 `;
@@ -43,6 +47,7 @@ export const pointFragmentShader = /* glsl */ `
   varying float vAge;
   varying float vEnergy;
   varying float vCentroid;
+  varying float vFlux;
 
   vec3 palette(float t) {
     vec3 warm = vec3(0.17, 0.12, 0.09);
@@ -59,7 +64,8 @@ export const pointFragmentShader = /* glsl */ `
     float energyGate  = smoothstep(0.12, 0.70, vEnergy);
 
     vec3 color = palette(vCentroid);
-    float alpha = fresh * fresh * energyGate * 0.86;
+    float fluxGlow = 0.55 + smoothstep(0.12, 0.95, vFlux) * 0.85;
+    float alpha = fresh * fresh * energyGate * fluxGlow * 0.86;
 
     gl_FragColor = vec4(color, alpha);
   }
@@ -74,15 +80,18 @@ export const trailVertexShader = /* glsl */ `
   attribute float aAge;
   attribute float aCentroid;
   attribute float aEnergy;
+  attribute float aFlux;
 
   varying float vAge;
   varying float vCentroid;
   varying float vEnergy;
+  varying float vFlux;
 
   void main() {
     vAge      = aAge;
     vCentroid = aCentroid;
     vEnergy   = aEnergy;
+    vFlux     = aFlux;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
@@ -91,6 +100,7 @@ export const trailFragmentShader = /* glsl */ `
   varying float vAge;
   varying float vCentroid;
   varying float vEnergy;
+  varying float vFlux;
 
   vec3 palette(float t) {
     vec3 warm = vec3(0.17, 0.12, 0.09);
@@ -105,12 +115,74 @@ export const trailFragmentShader = /* glsl */ `
     float energyBoost = smoothstep(0.07, 0.30, vEnergy);
 
     // Slightly faster than quadratic so the connecting line clears sooner
-    float alpha = pow(alive, 2.6) * 0.68 * energyBoost;
+    float fluxBoost = 0.72 + smoothstep(0.08, 0.95, vFlux) * 1.45;
+    float alpha = pow(alive, 2.2) * 0.74 * energyBoost * fluxBoost;
 
     vec3 color = palette(vCentroid);
     // Loud = darker ink; quiet = lighter (contrast drives attention to amplitude)
     color *= 1.0 - vEnergy * 0.25;
 
+    gl_FragColor = vec4(color, alpha);
+  }
+`;
+
+// ── Trajectory network links ───────────────────────────
+// Lightweight line-segment web that connects nearby states
+// from non-adjacent moments in the recent window.
+
+export const networkVertexShader = /* glsl */ `
+  attribute float aAge;
+  attribute float aWeight;
+  attribute float aCentroid;
+
+  varying float vAge;
+  varying float vWeight;
+  varying float vCentroid;
+  varying float vT; // 0.0 = older endpoint, 1.0 = newer endpoint
+
+  void main() {
+    vAge      = aAge;
+    vWeight   = aWeight;
+    vCentroid = aCentroid;
+    // gl_VertexID is even for the "source" vertex of every segment, odd for "target"
+    vT = mod(float(gl_VertexID), 2.0);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+export const networkFragmentShader = /* glsl */ `
+  uniform float uTime;
+
+  varying float vAge;
+  varying float vWeight;
+  varying float vCentroid;
+  varying float vT;
+
+  vec3 palette(float t) {
+    // Slightly warmer/cooler than trail so network reads as a distinct layer
+    vec3 warm = vec3(0.28, 0.17, 0.09);
+    vec3 cool = vec3(0.07, 0.17, 0.34);
+    return mix(warm, cool, smoothstep(0.0, 1.0, t));
+  }
+
+  void main() {
+    float ageFade = pow(max(0.0, 1.0 - vAge), 1.2);
+
+    // Directional fade: older end (vT=0) is dim, newer end (vT=1) is bright
+    float dirGrad = mix(0.18, 1.0, vT);
+
+    // Slow breath shared across all links
+    float pulse = 0.86 + 0.14 * sin(uTime * 1.4);
+
+    // Traveling highlight: a bright point moves from old->new end of each link.
+    // Phase is offset by vAge so different-aged links pulse at different times.
+    float phase  = mod(uTime * 0.55 + vAge * 4.8, 1.0);
+    float travel = max(0.0, 1.0 - abs(vT - phase) * 6.0);
+
+    float base  = ageFade * smoothstep(0.02, 0.75, vWeight) * dirGrad * pulse * 0.66;
+    float alpha = base + travel * ageFade * 0.26;
+
+    vec3 color = palette(vCentroid);
     gl_FragColor = vec4(color, alpha);
   }
 `;

@@ -55,7 +55,7 @@
 	let touchStartX = 0;
 	let touchStartY = 0;
 	let touchDeltaX = $state(0);
-	let isSwiping = false;
+	let isSwiping = $state(false);
 	let touchStartTime = 0;
 
 	const CARD_NAMES = ['ANALYSIS', 'MEL SPECTROGRAM', 'TRAJECTORY'];
@@ -109,8 +109,8 @@
 	const RADAR_LABELS = ['Centroid', 'Energy', 'Cross.', 'Tonality', 'Spread', 'Rolloff'];
 
 	const radarTextStyle = {
-		labelFont: '500 9px "JetBrains Mono"',
-		labelColor: 'rgba(42,42,50,0.34)',
+		labelFont: '500 10px "JetBrains Mono"',
+		labelColor: 'rgba(42,42,50,0.94)',
 		labelRadiusOffset: 24,
 		labelYOffset: -8,
 		valueFont: '400 10px "JetBrains Mono"',
@@ -729,6 +729,7 @@
 
 	<!-- ─── Card viewport (wraps all viz panels) ─── -->
 	<div class="cards-viewport" bind:this={cardsViewport}
+		role="region" aria-label="Visualization cards"
 		ontouchstart={onTouchStart}
 		ontouchend={onTouchEnd}>
 		<div class="cards-track"
