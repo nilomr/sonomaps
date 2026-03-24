@@ -16,6 +16,8 @@ export class AudioSource {
 	// Silent output shim so the browser actually processes the analyser
 	// (some browsers skip nodes not routed to destination)
 	private silentGain: GainNode | null = null;
+	// User-controlled gain node (before analyser)
+	private volumeGain: GainNode | null = null;
 
 	// Pre-allocated output buffers — caller reads these directly
 	freqData: Float32Array<ArrayBuffer> = new Float32Array(0);
@@ -35,27 +37,57 @@ export class AudioSource {
 	async startMic(): Promise<void> {
 		await this.initContext();
 		// Disable all browser audio processing to get raw mic signal.
-		// Use both standard constraints and Chrome-specific ones — browsers
-		// treat bare `false` as a "preference" they can ignore; `exact` and
-		// the `googXxx` keys are harder to override.
+		// Use simple boolean form (some Chrome versions handle { exact: false } oddly).
 		this.stream = await navigator.mediaDevices.getUserMedia({
 			audio: {
-				echoCancellation: { exact: false },
-				noiseSuppression: { exact: false },
-				autoGainControl: { exact: false },
-				// Chrome 120+: Voice Isolation is a separate processing
-				// layer that aggressively filters non-speech audio
+				echoCancellation: false,
+				noiseSuppression: false,
+				autoGainControl: false,
+				// Chrome / WebRTC-specific flags
 				voiceIsolation: false,
-				// Chrome-specific: these are the only way to truly
-				// disable Chrome's built-in audio processing pipeline
 				googEchoCancellation: false,
 				googAutoGainControl: false,
 				googNoiseSuppression: false,
 				googHighpassFilter: false
 			} as MediaTrackConstraints
 		});
+
+		// Re-apply constraints after stream creation (belt-and-suspenders)
+		// and log what Chrome actually gave us for diagnostics.
+		const track = this.stream.getAudioTracks()[0];
+		if (track) {
+			try {
+				await track.applyConstraints({
+					echoCancellation: false,
+					noiseSuppression: false,
+					autoGainControl: false
+				});
+			} catch { /* not all browsers support post-hoc applyConstraints */ }
+
+			const s = track.getSettings();
+			console.log('[SonoMaps] Mic track settings:', {
+				echoCancellation: s.echoCancellation,
+				noiseSuppression: s.noiseSuppression,
+				autoGainControl: s.autoGainControl,
+				sampleRate: s.sampleRate,
+				channelCount: s.channelCount,
+				deviceId: s.deviceId
+			});
+
+			// Warn if Chrome ignored our constraints
+			if (s.echoCancellation || s.noiseSuppression || s.autoGainControl) {
+				console.warn(
+					'[SonoMaps] Browser audio processing is still ON despite requesting it off. ' +
+					'This usually means the OS or audio driver is forcing voice filtering. ' +
+					'Try: (1) Disable Waves MaxxAudio / Realtek voice enhancement in system settings, ' +
+					'(2) Use an external USB mic, (3) Try a different browser.'
+				);
+			}
+		}
+
 		this.sourceNode = this.ctx!.createMediaStreamSource(this.stream);
-		this.sourceNode.connect(this.analyser!);
+		this.sourceNode.connect(this.volumeGain!);
+		this.volumeGain!.connect(this.analyser!);
 		// Route analyser → silent gain → destination so the browser
 		// actually processes the analyser node (no audible output).
 		this.analyser!.connect(this.silentGain!);
@@ -70,7 +102,8 @@ export class AudioSource {
 
 		const source = this.ctx!.createMediaElementSource(this.audioElement);
 		this.sourceNode = source;
-		source.connect(this.analyser!);
+		source.connect(this.volumeGain!);
+		this.volumeGain!.connect(this.analyser!);
 		// Route through analyser to destination so user hears the file
 		this.analyser!.connect(this.ctx!.destination);
 
@@ -87,6 +120,13 @@ export class AudioSource {
 		this.analyser.getFloatTimeDomainData(this.timeData);
 	}
 
+	/** Set the input gain (0 = silent, 1 = unity, 2 = boost). */
+	setVolume(value: number): void {
+		if (this.volumeGain && this.ctx) {
+			this.volumeGain.gain.setTargetAtTime(value, this.ctx.currentTime, 0.02);
+		}
+	}
+
 	stop(): void {
 		if (this.audioElement) {
 			this.audioElement.pause();
@@ -100,6 +140,10 @@ export class AudioSource {
 		if (this.stream) {
 			this.stream.getTracks().forEach((t) => t.stop());
 			this.stream = null;
+		}
+		if (this.volumeGain) {
+			this.volumeGain.disconnect();
+			this.volumeGain = null;
 		}
 		if (this.analyser) {
 			this.analyser.disconnect();
@@ -130,10 +174,13 @@ export class AudioSource {
 		this.analyser = this.ctx.createAnalyser();
 		this.analyser.fftSize = this.fftSize;
 		// Minimal smoothing — we want maximum temporal detail.
-		// The embedding smoother handles trajectory smoothness.
 		this.analyser.smoothingTimeConstant = 0.05;
 		this.analyser.minDecibels = -100;
 		this.analyser.maxDecibels = -10;
+
+		// Volume gain node: user-controlled, routes source → analyser
+		this.volumeGain = this.ctx.createGain();
+		this.volumeGain.gain.value = 1.0;
 
 		// Silent gain node: routes to destination with zero volume
 		// so the browser processes the audio graph even for mic input

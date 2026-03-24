@@ -2,50 +2,156 @@
 	import { onMount } from 'svelte';
 	import { AudioSource } from '$lib/audio/audio-source.js';
 	import { MelFeatureExtractor } from '$lib/dsp/mel.js';
-	import { DirectFeatureEmbedding } from '$lib/embedding/pca.js';
+	import { OnlinePCAEmbedding } from '$lib/embedding/pca.js';
 	import { EmbeddingSmoother } from '$lib/embedding/smoother.js';
-	import { PointCloudRenderer } from '$lib/render/point-cloud.js';
+	import { PointCloudRenderer, type TrajectoryMetrics } from '$lib/render/point-cloud.js';
+	import { MelCloudRenderer } from '$lib/render/mel-cloud.js';
 	import { SpectrogramRenderer } from '$lib/render/spectrogram.js';
+	import { OscilloscopeRenderer } from '$lib/render/oscilloscope.js';
+	import { PitchGaugeRenderer } from '$lib/render/pitch-gauge.js';
 
 	// ── DOM refs ───────────────────────────────────────────
-	let pointCanvas: HTMLCanvasElement;
+	let melCanvas: HTMLCanvasElement;
 	let spectroCanvas: HTMLCanvasElement;
+	let pointCanvas: HTMLCanvasElement;
+	let radarCanvas: HTMLCanvasElement;
+	let scopeCanvas: HTMLCanvasElement;
+	let pitchCanvas: HTMLCanvasElement;
+	let cardsViewport: HTMLDivElement;
 
 	// ── Rendering objects (not reactive) ──────────────────
-	let pointCloud: PointCloudRenderer | null = null;
+	let melCloud: MelCloudRenderer | null = null;
 	let spectrogram: SpectrogramRenderer | null = null;
+	let pointCloud: PointCloudRenderer | null = null;
+	let radarCtx: CanvasRenderingContext2D | null = null;
+	let scope: OscilloscopeRenderer | null = null;
+	let pitchGauge: PitchGaugeRenderer | null = null;
 
 	// ── Audio pipeline (not reactive) ─────────────────────
 	let audioSource: AudioSource | null = null;
 	let melExtractor: MelFeatureExtractor | null = null;
-	let embedding: DirectFeatureEmbedding | null = null;
+	let embedding: OnlinePCAEmbedding | null = null;
 	let smoother: EmbeddingSmoother | null = null;
 
-	// Plain boolean — NOT $state, zero reactivity in hot loop
 	let processing = false;
-
 	let animFrameId = 0;
 	let sampleIntervalId = 0;
 
-	// ── UI state (reactive, only touched by user interaction) ──
+	// ── UI state ──────────────────────────────────────────
 	let isRunning = $state(false);
 	let inputMode = $state<'mic' | 'file'>('mic');
-	let smoothing = $state(0.35);
-	let outputDim = $state<2 | 3>(3);
 	let fps = $state(0);
 	let selectedFile = $state<File | null>(null);
-	let status = $state('Ready');
+	let status = $state('READY');
+	let volume = $state(1.0);
+	let noiseThreshold = $state(1.8);
+	let floorDb = $state(-100);
+	let freqLo = $state(0);
+	let freqHi = $state(20000);
 
-	const FFT_SIZE = 2048;
-	const NUM_MEL_BANDS = 80;
-	const MAX_POINTS = 4000;
-	const SAMPLE_INTERVAL_MS = 4; // ~250 samples/sec
+	// ── Mobile state ────────────────────────────────────
+	let isMobile = $state(false);
+	let currentCard = $state(0);
+	let touchStartX = 0;
+	let touchStartY = 0;
+	let touchDeltaX = $state(0);
+	let isSwiping = $state(false);
+	let touchStartTime = 0;
 
-	// ── Pre-allocated buffers (ZERO allocation in hot path) ──
+	const CARD_NAMES = ['ANALYSIS', 'MEL SPECTROGRAM', 'TRAJECTORY'];
+	const NUM_CARDS = 3;
+
+	// ── Fixed parameters ─────────────────────────────────
+	const smoothing = 0.58;
+	const outputDim = 3;
+
+	// ── PCA calibration state ────────────────────────────
+	let pcaCalibrating = $state(false);
+
+	// ── Trajectory metrics (updated every frame) ─────────
+	let trajMetrics = $state<TrajectoryMetrics>({ spread: 0, drift: 0, flux: 0, segments: 0 });
+
+	// ── Feature display state (updated ~10Hz) ─────────────
+	let featCentroid = $state('—');
+	let featRms = $state('—');
+	let featZcr = $state('—');
+	let featFlat = $state('—');
+	let featBw = $state('—');
+	let featRol = $state('—');
+	let barCentroid = $state(0);
+	let barRms = $state(0);
+	let barZcr = $state(0);
+	let barFlat = $state(0);
+	let barBw = $state(0);
+	let barRol = $state(0);
+
+	// ── Radar trail history ──────────────────────────────
+	const RADAR_TRAIL_LENGTH = 12;
+	let radarSnapshots: number[][] = [];
+
+	// ── Radar smooth animation state ─────────────────────
+	const radarSmooth = new Float64Array(6); // smoothed bar values (0–1)
+	const RADAR_LERP = 0.18; // interpolation speed per frame
+
+	// ── Radar static grid cache ──────────────────────────
+	let radarGridCanvas: OffscreenCanvas | null = null;
+	let radarGridW = 0;
+	let radarGridH = 0;
+
+	// Pre-computed trig for 6 radar axes
+	const RADAR_N = 6;
+	const RADAR_STEP = (Math.PI * 2) / RADAR_N;
+	const RADAR_START = -Math.PI / 2;
+	const radarCos = new Float64Array(RADAR_N);
+	const radarSin = new Float64Array(RADAR_N);
+	for (let i = 0; i < RADAR_N; i++) {
+		const a = RADAR_START + i * RADAR_STEP;
+		radarCos[i] = Math.cos(a);
+		radarSin[i] = Math.sin(a);
+	}
+	const RADAR_LABELS = ['Centroid', 'Energy', 'Cross.', 'Tonality', 'Spread', 'Rolloff'];
+
+	const radarTextStyle = {
+		labelFont: '500 10px "JetBrains Mono"',
+		labelColor: 'rgba(42,42,50,0.94)',
+		labelRadiusOffset: 24,
+		labelYOffset: -8,
+		valueFont: '400 10px "JetBrains Mono"',
+		valueColor: 'rgba(42,42,50,0.40)',
+		valueYOffset: 11
+	};
+
+	function readRadarTextStyle(): void {
+		if (!radarCanvas) return;
+		const host = radarCanvas.parentElement ?? radarCanvas;
+		const s = getComputedStyle(host);
+
+		radarTextStyle.labelFont = s.getPropertyValue('--radar-label-font').trim() || radarTextStyle.labelFont;
+		radarTextStyle.labelColor = s.getPropertyValue('--radar-label-color').trim() || radarTextStyle.labelColor;
+		radarTextStyle.valueFont = s.getPropertyValue('--radar-value-font').trim() || radarTextStyle.valueFont;
+		radarTextStyle.valueColor = s.getPropertyValue('--radar-value-color').trim() || radarTextStyle.valueColor;
+
+		const labelRadiusOffset = parseFloat(s.getPropertyValue('--radar-label-radius-offset'));
+		if (!Number.isNaN(labelRadiusOffset)) radarTextStyle.labelRadiusOffset = labelRadiusOffset;
+
+		const labelYOffset = parseFloat(s.getPropertyValue('--radar-label-y-offset'));
+		if (!Number.isNaN(labelYOffset)) radarTextStyle.labelYOffset = labelYOffset;
+
+		const valueYOffset = parseFloat(s.getPropertyValue('--radar-value-y-offset'));
+		if (!Number.isNaN(valueYOffset)) radarTextStyle.valueYOffset = valueYOffset;
+	}
+
+	const FFT_SIZE = 1024;
+	const NUM_MEL_BANDS = 64;
+	const MAX_POINTS = 10000;
+	const SAMPLE_INTERVAL_MS = 4;
+	const MIN_GATE = 0.0005;
+
+	// ── Pre-allocated buffers ─────────────────────────────
 	const embeddingBuf = new Float32Array(3);
 	const pointData = new Float32Array(5);
 
-	// ── Online normalization for rendering metadata ──────
+	// ── Online normalization ──────────────────────────────
 	let energyEma = 0;
 	let energyVar = 0.01;
 	let centroidEma = 0;
@@ -59,56 +165,95 @@
 		return Math.max(0, Math.min(1, 0.5 + (raw - ema) / (4 * std)));
 	}
 
+	// ── Per-feature online normalizer for radar ──────────
+	class FeatureNormalizer {
+		private mean = 0;
+		private variance = 1;
+		private count = 0;
+		private readonly decay: number;
+
+		constructor(decay = 0.995) { this.decay = decay; }
+
+		update(raw: number): number {
+			this.count++;
+			if (this.count < 30) {
+				this.mean = raw;
+				return 0.5;
+			}
+			const d = this.decay;
+			this.mean = d * this.mean + (1 - d) * raw;
+			const diff = raw - this.mean;
+			this.variance = d * this.variance + (1 - d) * diff * diff;
+			const std = Math.sqrt(this.variance);
+			if (std < 1e-8) return 0.5;
+			return Math.max(0, Math.min(1, 0.5 + diff / (4 * std)));
+		}
+
+		reset(): void { this.mean = 0; this.variance = 1; this.count = 0; }
+	}
+
+	const radarNorm = {
+		centroid: new FeatureNormalizer(),
+		rms: new FeatureNormalizer(),
+		zcr: new FeatureNormalizer(),
+		flatness: new FeatureNormalizer(),
+		bandwidth: new FeatureNormalizer(),
+		rolloff: new FeatureNormalizer()
+	};
+
 	// ── Adaptive noise gate ──────────────────────────────
-	// Tracks the noise floor with a very slow EMA biased toward quiet frames.
-	// Gates at GATE_MULT × noise floor. No user-facing slider needed.
 	let noiseFloorEma = 0;
 	let noiseFloorInitialized = false;
-	const NOISE_FLOOR_DECAY = 0.998;  // very slow adaptation
-	const NOISE_FLOOR_UP = 0.95;      // rises quickly if floor increases
-	const GATE_MULT = 1.8;            // gate threshold = 1.8× noise floor
-	const MIN_GATE = 0.0005;          // absolute minimum gate
+	const NOISE_FLOOR_DECAY = 0.998;
+	const NOISE_FLOOR_UP = 0.95;
 
-	// FPS tracking
 	let frameCount = 0;
 	let lastFpsTime = 0;
+	let featCounter = 0;
+	let isAboveGate = false;
 
-	// ── High-frequency audio sampling ────────────────────
-	// Runs at ~250Hz via setInterval, independent of rAF.
-	// This gives smooth continuous trails instead of 60fps dots.
+	// ── Formatting helpers ───────────────────────────────
+	function fmtHz(hz: number): string {
+		if (hz >= 10000) return (hz / 1000).toFixed(0) + 'k';
+		if (hz >= 1000) return (hz / 1000).toFixed(1) + 'k';
+		return Math.round(hz).toString();
+	}
+
+	function fmtTonality(tonality: number): string {
+		const t = Math.max(0, Math.min(1, tonality));
+		if (t > 0.99) return t.toFixed(4);
+		return t.toFixed(3);
+	}
+
+	// ── High-frequency audio sampling (~250Hz) ───────────
 	function sampleAudio(): void {
 		if (!processing || !audioSource || !melExtractor || !embedding || !smoother) return;
 
-		// Read current audio snapshot
 		audioSource.read();
 		melExtractor.compute(audioSource.freqData, audioSource.timeData);
 
 		const rms = melExtractor.rms;
 
-		// ── Adaptive noise gate ─────────────────────────
 		if (!noiseFloorInitialized) {
 			noiseFloorEma = rms;
 			noiseFloorInitialized = true;
 		} else {
-			// Update noise floor: slow decay when signal is near/below floor,
-			// faster rise if the ambient level increases
 			if (rms < noiseFloorEma * 2.0) {
 				noiseFloorEma = NOISE_FLOOR_DECAY * noiseFloorEma + (1 - NOISE_FLOOR_DECAY) * rms;
-			} else if (rms > noiseFloorEma * 5.0) {
-				// Don't let very loud transients pull the floor up
-			} else {
+			} else if (rms < noiseFloorEma * 5.0) {
 				noiseFloorEma = NOISE_FLOOR_UP * noiseFloorEma + (1 - NOISE_FLOOR_UP) * rms;
 			}
 		}
 
-		const gate = Math.max(noiseFloorEma * GATE_MULT, MIN_GATE);
-		if (rms < gate) return;
+		const gate = Math.max(noiseFloorEma * noiseThreshold, MIN_GATE);
+		isAboveGate = rms >= gate;
+		if (!isAboveGate) return;
 
-		// ── Embedding ───────────────────────────────────
 		embedding.projectFromExtractor(melExtractor, embeddingBuf);
+		pcaCalibrating = embedding.isWarmingUp;
+		if (pcaCalibrating) return;
 		smoother.smooth(embeddingBuf);
 
-		// ── Rendering metadata (online normalization) ───
 		const logRms = Math.log1p(rms * 1000);
 		const logCentroid = Math.log1p(melExtractor.centroid);
 
@@ -130,39 +275,261 @@
 
 		pointData[0] = embeddingBuf[0];
 		pointData[1] = embeddingBuf[1];
-		pointData[2] = outputDim >= 3 ? embeddingBuf[2] : 0;
+		pointData[2] = embeddingBuf[2];
 		pointData[3] = normEnergy;
 		pointData[4] = normCentroid;
 		pointCloud!.addPoints(pointData, 1);
 	}
 
+	// ── HiDPI canvas helper ─────────────────────────────
+	function resizeHiDPI(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
+		const dpr = window.devicePixelRatio || 1;
+		const w = Math.round(canvas.clientWidth);
+		const h = Math.round(canvas.clientHeight);
+		const pw = Math.round(w * dpr);
+		const ph = Math.round(h * dpr);
+		if (w > 0 && h > 0 && (canvas.width !== pw || canvas.height !== ph)) {
+			canvas.width = pw;
+			canvas.height = ph;
+			ctx.resetTransform();
+			ctx.scale(dpr, dpr);
+		}
+	}
+
+	// ── Radar: build static grid offscreen ──────────────
+	function buildRadarGrid(w: number, h: number): void {
+		radarGridW = w;
+		radarGridH = h;
+		readRadarTextStyle();
+		const dpr = window.devicePixelRatio || 1;
+		radarGridCanvas = new OffscreenCanvas(Math.round(w * dpr), Math.round(h * dpr));
+		const g = radarGridCanvas.getContext('2d')!;
+		g.scale(dpr, dpr);
+
+		const cx = w / 2;
+		const cy = h / 2;
+		const radius = Math.min(w, h) * 0.30;
+
+		// Concentric rings
+		for (let ring = 1; ring <= 3; ring++) {
+			const r = radius * (ring / 3);
+			g.strokeStyle = ring === 3 ? 'rgba(42,42,50,0.14)' : 'rgba(42,42,50,0.06)';
+			g.lineWidth = 0.5;
+			g.beginPath();
+			for (let i = 0; i <= RADAR_N; i++) {
+				const idx = i % RADAR_N;
+				const x = cx + radarCos[idx] * r;
+				const y = cy + radarSin[idx] * r;
+				if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+			}
+			g.closePath();
+			g.stroke();
+		}
+
+		// Axis lines
+		g.strokeStyle = 'rgba(42,42,50,0.1)';
+		g.lineWidth = 0.5;
+		for (let i = 0; i < RADAR_N; i++) {
+			g.beginPath();
+			g.moveTo(cx, cy);
+			g.lineTo(cx + radarCos[i] * radius, cy + radarSin[i] * radius);
+			g.stroke();
+		}
+
+		// Labels (static part — feature names)
+		g.textAlign = 'center';
+		g.textBaseline = 'middle';
+		g.fillStyle = radarTextStyle.labelColor;
+		g.font = radarTextStyle.labelFont;
+		const lr = radius + radarTextStyle.labelRadiusOffset;
+		for (let i = 0; i < RADAR_N; i++) {
+			g.fillText(RADAR_LABELS[i], cx + radarCos[i] * lr, cy + radarSin[i] * lr + radarTextStyle.labelYOffset);
+		}
+	}
+
+	// ── Radar chart rendering (optimized) ────────────────
+	function renderRadar(): void {
+		if (!radarCtx || !radarCanvas) return;
+		resizeHiDPI(radarCanvas, radarCtx);
+
+		const w = radarCanvas.clientWidth;
+		const h = radarCanvas.clientHeight;
+		if (w === 0 || h === 0) return;
+
+		// Rebuild static grid cache on size change
+		if (w !== radarGridW || h !== radarGridH) buildRadarGrid(w, h);
+
+		const cx = w / 2;
+		const cy = h / 2;
+		const radius = Math.min(w, h) * 0.30;
+
+		// Target bar values
+		const targets = [
+			barCentroid / 100, barRms / 100, barZcr / 100,
+			barFlat / 100, barBw / 100, barRol / 100
+		];
+		const vals = [featCentroid, featRms, featZcr, featFlat, featBw, featRol];
+
+		// Smooth interpolation every frame
+		for (let i = 0; i < RADAR_N; i++) {
+			radarSmooth[i] += (targets[i] - radarSmooth[i]) * RADAR_LERP;
+		}
+
+		// Clear and stamp cached grid
+		radarCtx.clearRect(0, 0, w, h);
+		if (radarGridCanvas) radarCtx.drawImage(radarGridCanvas, 0, 0, w, h);
+
+		// ── Trail polygons (batched: single path per trail) ──
+		const sLen = radarSnapshots.length;
+		for (let t = 0; t < sLen; t++) {
+			const snap = radarSnapshots[t];
+			const age = (sLen - t) / (sLen + 1);
+			const alpha = Math.max(0.008, (1 - age * age) * 0.08);
+
+			radarCtx.fillStyle = `rgba(42,42,50,${alpha.toFixed(3)})`;
+			radarCtx.beginPath();
+			for (let i = 0; i <= RADAR_N; i++) {
+				const idx = i % RADAR_N;
+				const rv = radius * Math.max(0.03, snap[idx]);
+				const x = cx + radarCos[idx] * rv;
+				const y = cy + radarSin[idx] * rv;
+				if (i === 0) radarCtx.moveTo(x, y); else radarCtx.lineTo(x, y);
+			}
+			radarCtx.closePath();
+			radarCtx.fill();
+		}
+
+		// ── Current polygon (fill + stroke in one path build) ──
+		radarCtx.beginPath();
+		for (let i = 0; i <= RADAR_N; i++) {
+			const idx = i % RADAR_N;
+			const rv = radius * Math.max(0.03, radarSmooth[idx]);
+			const x = cx + radarCos[idx] * rv;
+			const y = cy + radarSin[idx] * rv;
+			if (i === 0) radarCtx.moveTo(x, y); else radarCtx.lineTo(x, y);
+		}
+		radarCtx.closePath();
+		radarCtx.fillStyle = 'rgba(42,42,50,0.045)';
+		radarCtx.fill();
+		radarCtx.strokeStyle = 'rgba(42,42,50,0.38)';
+		radarCtx.lineWidth = 1.5;
+		radarCtx.stroke();
+
+		// Vertex dots (single fillStyle, batch arcs)
+		radarCtx.fillStyle = 'rgba(42,42,50,0.5)';
+		for (let i = 0; i < RADAR_N; i++) {
+			const rv = radius * Math.max(0.03, radarSmooth[i]);
+			radarCtx.beginPath();
+			radarCtx.arc(cx + radarCos[i] * rv, cy + radarSin[i] * rv, 2.5, 0, Math.PI * 2);
+			radarCtx.fill();
+		}
+
+		// Value labels (dynamic — update every frame for smooth text)
+		radarCtx.textAlign = 'center';
+		radarCtx.textBaseline = 'middle';
+		radarCtx.fillStyle = radarTextStyle.valueColor;
+		radarCtx.font = radarTextStyle.valueFont;
+		const lr = radius + radarTextStyle.labelRadiusOffset;
+		for (let i = 0; i < RADAR_N; i++) {
+			radarCtx.fillText(vals[i], cx + radarCos[i] * lr, cy + radarSin[i] * lr + radarTextStyle.valueYOffset);
+		}
+	}
+
 	// ── Lifecycle ─────────────────────────────────────────
 	onMount(() => {
-		pointCloud = new PointCloudRenderer(pointCanvas, {
-			maxPoints: MAX_POINTS,
-			outputDim,
-			pointSize: 1.8
+		radarCtx = radarCanvas.getContext('2d');
+
+		melCloud = new MelCloudRenderer(melCanvas, {
+			maxFrames: 400,
+			numBands: NUM_MEL_BANDS
 		});
 
 		spectrogram = new SpectrogramRenderer(spectroCanvas, NUM_MEL_BANDS);
+		scope = new OscilloscopeRenderer(scopeCanvas);
+		pitchGauge = new PitchGaugeRenderer(pitchCanvas);
+
+		pointCloud = new PointCloudRenderer(pointCanvas, {
+			maxPoints: MAX_POINTS,
+			outputDim,
+			pointSize: 1
+		});
+
+		// ── Mobile detection ──────────────────────────
+		const mql = window.matchMedia('(max-width: 768px)');
+		isMobile = mql.matches;
+		const onMqlChange = (e: MediaQueryListEvent) => {
+			isMobile = e.matches;
+			if (!isMobile) { currentCard = 0; touchDeltaX = 0; }
+		};
+		mql.addEventListener('change', onMqlChange);
+
+		// Non-passive touchmove for preventDefault
+		if (cardsViewport) {
+			cardsViewport.addEventListener('touchmove', onTouchMove, { passive: false });
+		}
 
 		const onResize = () => {
-			pointCloud?.resize();
+			melCloud?.resize();
 			spectrogram?.resize();
+			pointCloud?.resize();
 		};
 		window.addEventListener('resize', onResize);
 
-		// ── Render loop (rAF) — only rendering, no audio processing ──
 		function loop() {
-			// Feed spectrogram from latest mel data (once per display frame)
 			if (processing && melExtractor) {
-				spectrogram!.addColumn(melExtractor.logMelEnergies);
+				melCloud!.addFrame(melExtractor.logMelEnergies);
+				spectrogram?.addColumn(melExtractor.logMelEnergies);
 			}
 
-			// Render point cloud (ages points, draws scene)
-			pointCloud?.render();
+			// Render only visible card on mobile for performance
+			// Card order on mobile: 0=Analysis, 1=Mel, 2=Trajectory
+			if (!isMobile || currentCard === 0) renderRadar();
+			if (!isMobile || currentCard === 1) melCloud?.render();
+			if (!isMobile || currentCard === 2) {
+				pointCloud?.render();
+				if (pointCloud) trajMetrics = pointCloud.getMetrics();
+			}
 
-			// FPS (update Svelte state only once per second)
+			// Oscilloscope + pitch gauge (Analysis card)
+			if (!isMobile || currentCard === 0) {
+				if (processing && audioSource) {
+					scope?.draw(audioSource.timeData);
+					pitchGauge?.draw(melExtractor?.peakFreq ?? 0, melExtractor?.rms ?? 0);
+				} else {
+					scope?.draw(new Float32Array(0));
+					pitchGauge?.draw(0, 0);
+				}
+			}
+
+			featCounter++;
+			if (featCounter % 6 === 0 && processing && melExtractor) {
+				const m = melExtractor;
+				// Only update radar normalizers when above noise gate
+				const gate = Math.max(noiseFloorEma * noiseThreshold, MIN_GATE);
+				if (m.rms >= gate) {
+					featCentroid = fmtHz(m.centroid);
+					barCentroid = radarNorm.centroid.update(Math.log1p(m.centroid)) * 100;
+					featRms = m.rms.toFixed(3);
+					barRms = radarNorm.rms.update(Math.log1p(m.rms * 1000)) * 100;
+					featZcr = m.zcr.toFixed(3);
+					barZcr = radarNorm.zcr.update(m.zcr) * 100;
+					const tonality = m.tonality;
+					featFlat = fmtTonality(tonality);
+					barFlat = radarNorm.flatness.update(tonality) * 100;
+					featBw = fmtHz(m.bandwidth);
+					barBw = radarNorm.bandwidth.update(Math.log1p(m.bandwidth)) * 100;
+					featRol = fmtHz(m.rolloff);
+					barRol = radarNorm.rolloff.update(Math.log1p(m.rolloff)) * 100;
+
+					// Add radar trail snapshot
+					radarSnapshots.push([
+						barCentroid / 100, barRms / 100, barZcr / 100,
+						barFlat / 100, barBw / 100, barRol / 100
+					]);
+					if (radarSnapshots.length > RADAR_TRAIL_LENGTH) radarSnapshots.shift();
+				}
+			}
+
 			frameCount++;
 			const now = performance.now();
 			if (now - lastFpsTime >= 1000) {
@@ -180,18 +547,18 @@
 			cancelAnimationFrame(animFrameId);
 			clearInterval(sampleIntervalId);
 			window.removeEventListener('resize', onResize);
+			mql.removeEventListener('change', onMqlChange);
+			cardsViewport?.removeEventListener('touchmove', onTouchMove);
 			stop();
+			melCloud?.dispose();
 			pointCloud?.dispose();
 		};
 	});
 
-	// ── Start / Stop ─────────────────────────────────────
 	async function start() {
 		if (isRunning) return;
-
 		try {
-			status = 'Initialising\u2026';
-
+			status = 'INIT';
 			audioSource = new AudioSource(FFT_SIZE);
 
 			if (inputMode === 'mic') {
@@ -199,9 +566,11 @@
 			} else if (selectedFile) {
 				await audioSource.startFile(selectedFile);
 			} else {
-				status = 'Select an audio file first';
+				status = 'NO FILE';
 				return;
 			}
+
+			audioSource.setVolume(volume);
 
 			melExtractor = new MelFeatureExtractor({
 				sampleRate: audioSource.sampleRate,
@@ -209,29 +578,30 @@
 				numMelBands: NUM_MEL_BANDS,
 				numMfccs: 13
 			});
+			melExtractor.floorDb = floorDb;
+			melExtractor.minFreqHz = freqLo;
+			melExtractor.maxFreqHz = freqHi;
 
-			embedding = new DirectFeatureEmbedding(outputDim);
+			embedding = new OnlinePCAEmbedding();
 			smoother = new EmbeddingSmoother(outputDim, smoothing);
 
-			// Reset rendering normalization
-			energyEma = 0;
-			energyVar = 0.01;
-			centroidEma = 0;
-			centroidVar = 1;
+			energyEma = 0; energyVar = 0.01;
+			centroidEma = 0; centroidVar = 1;
 			warmupCount = 0;
+			noiseFloorEma = 0; noiseFloorInitialized = false;
+			radarSnapshots = [];
+			for (const n of Object.values(radarNorm)) n.reset();
 
-			// Reset adaptive noise gate
-			noiseFloorEma = 0;
-			noiseFloorInitialized = false;
+			melCloud?.clear();
+			pointCloud?.clear();
+			pitchGauge?.reset();
 
-			// Start high-frequency audio sampling
 			processing = true;
 			sampleIntervalId = window.setInterval(sampleAudio, SAMPLE_INTERVAL_MS);
-
 			isRunning = true;
-			status = inputMode === 'mic' ? 'Listening' : 'Playing';
+			status = inputMode === 'mic' ? 'LISTENING' : 'PLAYING';
 		} catch (err) {
-			status = `Error: ${err instanceof Error ? err.message : String(err)}`;
+			status = `ERR: ${err instanceof Error ? err.message : String(err)}`;
 		}
 	}
 
@@ -244,7 +614,11 @@
 		melExtractor = null;
 		embedding = null;
 		smoother = null;
-		status = 'Ready';
+		status = 'READY';
+		featCentroid = '—'; featRms = '—'; featZcr = '—';
+		featFlat = '—'; featBw = '—'; featRol = '—';
+		barCentroid = 0; barRms = 0; barZcr = 0;
+		barFlat = 0; barBw = 0; barRol = 0;
 	}
 
 	function toggle() {
@@ -256,287 +630,1280 @@
 		const input = e.target as HTMLInputElement;
 		if (input.files && input.files.length > 0) {
 			selectedFile = input.files[0];
-			status = `File: ${input.files[0].name}`;
 		}
 	}
 
-	$effect(() => {
-		if (smoother) smoother.alpha = smoothing;
-	});
+	function onVolumeInput() {
+		audioSource?.setVolume(volume);
+	}
+
+	function onFilterChange() {
+		if (!melExtractor) return;
+		melExtractor.floorDb = floorDb;
+		melExtractor.minFreqHz = freqLo;
+		melExtractor.maxFreqHz = freqHi;
+	}
+
+	// ── Mobile touch handlers ───────────────────────────
+	function onTouchStart(e: TouchEvent) {
+		if (!isMobile) return;
+		touchStartX = e.touches[0].clientX;
+		touchStartY = e.touches[0].clientY;
+		touchStartTime = Date.now();
+		touchDeltaX = 0;
+		isSwiping = false;
+	}
+
+	function onTouchMove(e: TouchEvent) {
+		if (!isMobile) return;
+		const dx = e.touches[0].clientX - touchStartX;
+		const dy = e.touches[0].clientY - touchStartY;
+
+		if (!isSwiping) {
+			if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 8) {
+				isSwiping = true;
+			} else {
+				return;
+			}
+		}
+
+		e.preventDefault();
+		// Rubber band at edges
+		if ((currentCard === 0 && dx > 0) || (currentCard === NUM_CARDS - 1 && dx < 0)) {
+			touchDeltaX = dx * 0.25;
+		} else {
+			touchDeltaX = dx;
+		}
+	}
+
+	function onTouchEnd() {
+		if (!isMobile || !isSwiping) {
+			touchDeltaX = 0;
+			return;
+		}
+		const elapsed = Date.now() - touchStartTime;
+		const velocity = Math.abs(touchDeltaX / Math.max(elapsed, 1));
+		// Velocity-based: fast flicks need less distance
+		const threshold = velocity > 0.4 ? 30 : window.innerWidth * 0.2;
+
+		if (touchDeltaX < -threshold && currentCard < NUM_CARDS - 1) {
+			currentCard++;
+		} else if (touchDeltaX > threshold && currentCard > 0) {
+			currentCard--;
+		}
+		touchDeltaX = 0;
+		isSwiping = false;
+		triggerCardResize();
+	}
+
+	function triggerCardResize() {
+		setTimeout(() => {
+			melCloud?.resize();
+			spectrogram?.resize();
+			pointCloud?.resize();
+		}, 60);
+	}
+
+	function goToCard(i: number) {
+		currentCard = i;
+		triggerCardResize();
+	}
 </script>
 
 <svelte:head>
 	<title>SonoMaps</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+	<meta name="theme-color" content="#f2ede4" />
+	<link rel="preconnect" href="https://fonts.googleapis.com" />
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+	<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet" />
 </svelte:head>
 
-<main>
-	<!-- Embedding point cloud -->
-	<div class="embedding-view">
-		<canvas bind:this={pointCanvas}></canvas>
-		<div class="overlay-top-left">
-			<span class="title">SonoMaps</span>
-			<span class="subtitle">x: brightness &middot; y: energy{outputDim === 3 ? ' &middot; z: tonality' : ''}</span>
+<main class:mobile={isMobile}>
+	<!-- ─── Mobile header ─── -->
+	<header class="mobile-header">
+		<div class="mobile-brand">
+			<span class="brand-top">SONO</span>
+			<span class="brand-bottom">MAPS</span>
+		</div>
+		<span class="status-badge mobile-status" class:active={isRunning}>{status}</span>
+		<div class="mobile-fps">
+			<span class="fps-number">{fps}</span>
+			<span class="fps-label">FPS</span>
+		</div>
+	</header>
+
+	<!-- ─── Card viewport (wraps all viz panels) ─── -->
+	<div class="cards-viewport" bind:this={cardsViewport}
+		role="region" aria-label="Visualization cards"
+		ontouchstart={onTouchStart}
+		ontouchend={onTouchEnd}>
+		<div class="cards-track"
+			style={isMobile ? `transform:translateX(calc(${-currentCard} * (100vw - 28px) + ${touchDeltaX}px));${isSwiping ? '' : 'transition:transform 0.35s cubic-bezier(0.22,0.68,0.35,1)'}` : ''}>
+
+			<!-- ─── Analysis (card 0 on mobile) ─── -->
+			<section class="panel analysis">
+				<div class="analysis-radar">
+					<canvas bind:this={radarCanvas} class="fill-canvas"></canvas>
+				</div>
+				<div class="analysis-pitch">
+					<canvas bind:this={pitchCanvas}></canvas>
+					<span class="panel-label sub">PEAK FREQ</span>
+				</div>
+				<div class="analysis-scope">
+					<canvas bind:this={scopeCanvas}></canvas>
+					<span class="panel-label sub">WAVEFORM</span>
+				</div>
+				<span class="panel-label">ANALYSIS</span>
+			</section>
+
+			<!-- ─── Mel cloud (card 1 on mobile) ─── -->
+			<section class="panel mel-cloud">
+				<div class="mel-3d">
+					<canvas bind:this={melCanvas}></canvas>
+				</div>
+				<div class="mel-2d">
+					<canvas bind:this={spectroCanvas}></canvas>
+				</div>
+				<span class="panel-label">MEL SPECTROGRAM</span>
+			</section>
+
+			<!-- ─── Trajectory (card 2 on mobile) ─── -->
+			<section class="panel trajectory">
+				<canvas bind:this={pointCanvas}></canvas>
+				<span class="panel-label">TRAJECTORY</span>
+				<div class="axes-overlay">
+					{#if isRunning && pcaCalibrating}
+						CALIBRATING
+					{:else}
+						<span class="ax-key">X</span> PC1
+						<span class="ax-sep">/</span>
+						<span class="ax-key">Y</span> PC2
+						<span class="ax-sep">/</span>
+						<span class="ax-key">Z</span> PC3
+					{/if}
+				</div>
+				{#if isRunning && !pcaCalibrating && trajMetrics.spread > 0}
+					<div class="traj-metrics">
+						<div class="tm-row">
+							<span class="tm-label">SPREAD</span>
+							<span class="tm-value">{trajMetrics.spread.toFixed(2)}</span>
+						</div>
+						<div class="tm-row">
+							<span class="tm-label">DRIFT</span>
+							<span class="tm-value">{trajMetrics.drift.toFixed(3)}</span>
+						</div>
+						<div class="tm-row">
+							<span class="tm-label">FLUX</span>
+							<span class="tm-value">{trajMetrics.flux.toFixed(3)}</span>
+						</div>
+						<div class="tm-row">
+							<span class="tm-label">LINKS</span>
+							<span class="tm-value">{trajMetrics.segments}</span>
+						</div>
+					</div>
+				{/if}
+			</section>
 		</div>
 	</div>
 
-	<!-- Scrolling mel spectrogram -->
-	<div class="spectrogram-view">
-		<canvas bind:this={spectroCanvas}></canvas>
-		<div class="spectrogram-label">
-			<span>Mel Spectrogram</span>
+	<!-- ─── Card indicator (visible on mobile) ─── -->
+	<nav class="card-indicator">
+		<span class="card-label">{CARD_NAMES[currentCard]}</span>
+		<div class="card-dots">
+			{#each CARD_NAMES as _, i}
+				<button class="card-dot" class:active={currentCard === i}
+					onclick={() => goToCard(i)}
+					aria-label={CARD_NAMES[i]}></button>
+			{/each}
 		</div>
-	</div>
+	</nav>
 
-	<!-- Controls -->
-	<div class="controls">
-		<div class="controls-inner">
-			<button class="btn" class:active={isRunning} onclick={toggle}>
-				{isRunning ? 'Stop' : 'Start'}
-			</button>
-
-			<div class="control-group" role="group" aria-label="Input source">
-				<span class="label">Source</span>
-				<div class="toggle-group">
-					<button
-						class="toggle-btn"
-						class:active={inputMode === 'mic'}
-						disabled={isRunning}
-						onclick={() => (inputMode = 'mic')}
-					>Mic</button>
-					<button
-						class="toggle-btn"
-						class:active={inputMode === 'file'}
-						disabled={isRunning}
-						onclick={() => (inputMode = 'file')}
-					>File</button>
-				</div>
+	<!-- ─── Controls bar ─── -->
+	<section class="panel controls-bar">
+		<!-- Brand -->
+		<div class="ctrl-brand">
+			<div class="brand-text">
+				<span class="brand-top">SONO</span>
+				<span class="brand-bottom">MAPS</span>
 			</div>
+			<span class="status-badge" class:active={isRunning}>{status}</span>
+		</div>
+		<!-- Credit: absolutely positioned so it doesn't affect flex baseline -->
+		<a class="design-credit" href="https://sedum.studio" target="_blank"
+			rel="noopener noreferrer">designed by <span>sedum.studio</span></a>
 
-			{#if inputMode === 'file'}
-				<div class="control-group">
-					<input
-						type="file"
-						accept="audio/*"
-						onchange={onFileChange}
-						disabled={isRunning}
-						class="file-input"
-					/>
+		<div class="ctrl-sep"></div>
+
+		<!-- Input -->
+		<div class="ctrl-section">
+			<span class="section-label">INPUT</span>
+			<div class="section-body">
+				<button class="ctrl-btn play" class:active={isRunning} onclick={toggle}
+					aria-label={isRunning ? 'Stop' : 'Start'}>
+					{#if isRunning}
+						<span class="icon-stop"></span>
+					{:else}
+						<span class="icon-play"></span>
+					{/if}
+				</button>
+				<div class="input-toggle">
+					<button class="toggle-btn" class:active={inputMode === 'mic'} disabled={isRunning}
+						onclick={() => (inputMode = 'mic')}>MIC</button>
+					<button class="toggle-btn" class:active={inputMode === 'file'} disabled={isRunning}
+						onclick={() => (inputMode = 'file')}>FILE</button>
 				</div>
-			{/if}
-
-			<div class="control-group">
-				<label class="label" for="smoothing-slider">
-					Smoothing {smoothing.toFixed(2)}
-				</label>
-				<input
-					id="smoothing-slider"
-					type="range"
-					min="0.02"
-					max="0.6"
-					step="0.01"
-					bind:value={smoothing}
-					class="slider"
-				/>
-			</div>
-
-			<div class="control-group" role="group" aria-label="Dimensions">
-				<span class="label">Dim</span>
-				<div class="toggle-group">
-					<button
-						class="toggle-btn"
-						class:active={outputDim === 2}
-						disabled={isRunning}
-						onclick={() => (outputDim = 2)}
-					>2D</button>
-					<button
-						class="toggle-btn"
-						class:active={outputDim === 3}
-						disabled={isRunning}
-						onclick={() => (outputDim = 3)}
-					>3D</button>
-				</div>
-			</div>
-
-			<div class="status-fps">
-				<span class="status">{status}</span>
-				<span class="fps">{fps} fps</span>
+				{#if inputMode === 'file'}
+					<label class="file-btn">
+						<span>{selectedFile ? selectedFile.name.slice(0, 12).toUpperCase() : 'CHOOSE'}</span>
+						<input type="file" accept="audio/*" onchange={onFileChange}
+							disabled={isRunning} class="file-hidden" />
+					</label>
+				{/if}
 			</div>
 		</div>
-	</div>
+
+		<div class="ctrl-sep"></div>
+
+		<!-- Parameters -->
+		<div class="ctrl-section grow">
+			<span class="section-label">PARAMETERS</span>
+			<div class="section-body params-body">
+				<div class="param">
+					<span class="param-label">VOL</span>
+					<div class="param-wheel">
+						<input type="range" class="wheel-slider" min="0" max="2" step="0.01"
+							bind:value={volume} oninput={onVolumeInput} />
+					</div>
+					<span class="param-readout">{volume.toFixed(2)}</span>
+				</div>
+				<div class="filter-group">
+					<div class="filter-sel">
+						<span class="param-label">FLOOR</span>
+						<select bind:value={floorDb} onchange={onFilterChange}>
+							<option value={-100}>OFF</option>
+							<option value={-80}>-80 dB</option>
+							<option value={-70}>-70 dB</option>
+							<option value={-60}>-60 dB</option>
+							<option value={-50}>-50 dB</option>
+							<option value={-40}>-40 dB</option>
+						</select>
+					</div>
+					<div class="filter-sel">
+						<span class="param-label">LO</span>
+						<select bind:value={freqLo} onchange={onFilterChange}>
+							<option value={0}>OFF</option>
+							<option value={50}>50</option>
+							<option value={100}>100</option>
+							<option value={200}>200</option>
+							<option value={500}>500</option>
+							<option value={1000}>1k</option>
+							<option value={2000}>2k</option>
+						</select>
+					</div>
+					<div class="filter-sel">
+						<span class="param-label">HI</span>
+						<select bind:value={freqHi} onchange={onFilterChange}>
+							<option value={20000}>OFF</option>
+							<option value={16000}>16k</option>
+							<option value={12000}>12k</option>
+							<option value={8000}>8k</option>
+							<option value={4000}>4k</option>
+							<option value={2000}>2k</option>
+						</select>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<!-- FPS -->
+		<div class="ctrl-fps">
+			<span class="fps-number">{fps}</span>
+			<span class="fps-label">FPS</span>
+		</div>
+	</section>
+
+	<!-- ─── Mobile credit (very bottom) ─── -->
+	<a class="mobile-credit" href="https://sedum.studio" target="_blank"
+		rel="noopener noreferrer">designed by <span>sedum.studio</span></a>
 </main>
 
 <style>
+	/* ── Reset & base ────────────────────────────── */
 	:global(body) {
 		margin: 0;
 		padding: 0;
-		background: #08080f;
-		color: #b0b0c8;
-		font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+		background: #f2ede4;
+		color: #2a2a32;
+		font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
 		overflow: hidden;
+		-webkit-font-smoothing: antialiased;
 	}
 
+	/* ── Grid layout ─────────────────────────────── */
 	main {
 		width: 100vw;
 		height: 100vh;
-		display: flex;
-		flex-direction: column;
+		display: grid;
+		grid-template-columns: 1fr 1fr 0.55fr;
+		grid-template-rows: 1fr auto;
+		grid-template-areas:
+			"mel traj radar"
+			"ctrl ctrl ctrl";
+		gap: 1px;
+		background: rgba(42, 42, 50, 0.18);
 	}
 
-	.embedding-view {
-		flex: 1;
+	/* ── Panel base ──────────────────────────────── */
+	.panel {
 		position: relative;
-		min-height: 0;
+		background: #f2ede4;
+		overflow: hidden;
 	}
 
-	.embedding-view canvas {
-		width: 100%;
-		height: 100%;
-		display: block;
-	}
-
-	.overlay-top-left {
+	.panel-label {
 		position: absolute;
 		top: 14px;
 		left: 18px;
+		font-size: 10px;
+		font-weight: 500;
+		letter-spacing: 2.5px;
+		color: rgba(42, 42, 50, 0.42);
+		pointer-events: none;
+		z-index: 2;
+	}
+
+	/* ── Panels ──────────────────────────────────── */
+	.mel-cloud { grid-area: mel; }
+	.trajectory { grid-area: traj; }
+	.analysis { grid-area: radar; }
+	.controls-bar { grid-area: ctrl; }
+
+	.mel-cloud {
 		display: flex;
 		flex-direction: column;
-		gap: 2px;
-		pointer-events: none;
 	}
 
-	.title {
-		font-size: 14px;
-		font-weight: 600;
-		color: rgba(160, 170, 210, 0.5);
-		letter-spacing: 1.5px;
-		text-transform: uppercase;
+	.mel-3d {
+		flex: 1;
+		min-height: 0;
 	}
 
-	.subtitle {
-		font-size: 10px;
-		color: rgba(120, 130, 160, 0.35);
-		letter-spacing: 0.3px;
-	}
-
-	.spectrogram-view {
-		height: 160px;
-		position: relative;
-		border-top: 1px solid rgba(80, 80, 120, 0.12);
-		background: #06060c;
-		flex-shrink: 0;
-	}
-
-	.spectrogram-view canvas {
+	.mel-3d canvas {
 		width: 100%;
 		height: 100%;
 		display: block;
 	}
 
-	.spectrogram-label {
+	.mel-2d {
+		height: 10%;
+		min-height: 28px;
+		border-top: 1px solid rgba(42, 42, 50, 0.14);
+	}
+
+	.mel-2d canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.trajectory canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.fill-canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	/* ── Axes overlay ────────────────────────────── */
+	.axes-overlay {
 		position: absolute;
-		top: 6px;
-		left: 12px;
+		bottom: 18px;
+		left: 40px;
+		font-size: 10px;
+		font-weight: 400;
+		letter-spacing: 1.5px;
+		color: rgba(42, 42, 50, 0.35);
 		pointer-events: none;
+		z-index: 2;
 	}
 
-	.spectrogram-label span {
-		font-size: 9px;
-		text-transform: uppercase;
-		letter-spacing: 0.6px;
-		color: rgba(140, 140, 170, 0.3);
+	.ax-key {
+		font-weight: 600;
+		color: rgba(42, 42, 50, 0.55);
 	}
 
-	.controls {
-		background: rgba(8, 8, 15, 0.94);
-		backdrop-filter: blur(16px);
-		border-top: 1px solid rgba(80, 80, 120, 0.12);
-		padding: 9px 18px;
-		flex-shrink: 0;
+	.ax-sep {
+		margin: 0 5px;
+		font-weight: 300;
+		color: rgba(42, 42, 50, 0.18);
 	}
 
-	.controls-inner {
-		max-width: 960px;
-		margin: 0 auto;
-		display: flex;
-		align-items: center;
-		gap: 16px;
-		flex-wrap: wrap;
-	}
-
-	.btn {
-		padding: 6px 20px;
-		border: 1px solid rgba(100, 160, 255, 0.3);
-		background: rgba(100, 160, 255, 0.05);
-		color: rgba(140, 180, 255, 0.75);
-		border-radius: 4px;
-		font-size: 12px;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.12s;
-	}
-	.btn:hover {
-		background: rgba(100, 160, 255, 0.12);
-	}
-	.btn.active {
-		background: rgba(255, 90, 90, 0.08);
-		border-color: rgba(255, 90, 90, 0.35);
-		color: rgba(255, 130, 130, 0.85);
-	}
-
-	.control-group {
+	/* ── Trajectory metrics overlay ──────────────── */
+	.traj-metrics {
+		position: absolute;
+		bottom: 18px;
+		right: 18px;
 		display: flex;
 		flex-direction: column;
 		gap: 3px;
+		pointer-events: none;
+		z-index: 2;
 	}
 
-	.label {
+	.tm-row {
+		display: flex;
+		justify-content: flex-end;
+		align-items: baseline;
+		gap: 8px;
+	}
+
+	.tm-label {
+		font-size: 8px;
+		font-weight: 500;
+		letter-spacing: 2px;
+		color: rgba(42, 42, 50, 0.28);
+	}
+
+	.tm-value {
+		font-size: 10px;
+		font-weight: 400;
+		letter-spacing: 0.5px;
+		color: rgba(42, 42, 50, 0.45);
+		font-variant-numeric: tabular-nums;
+		min-width: 3.5em;
+		text-align: right;
+	}
+
+	/* ── Analysis layout ─────────────────────────── */
+	.analysis {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.analysis-radar {
+		flex: 1;
+		min-height: 0;
+		position: relative;
+		--radar-label-font: 500 9px "JetBrains Mono";
+		--radar-label-color: rgba(42, 42, 50, 0.34);
+		--radar-label-radius-offset: 24;
+		--radar-label-y-offset: -8;
+		--radar-value-font: 400 10px "JetBrains Mono";
+		--radar-value-color: rgba(42, 42, 50, 0.4);
+		--radar-value-y-offset: 11;
+	}
+
+	.analysis-pitch {
+		height: 30%;
+		min-height: 80px;
+		border-top: 1px solid rgba(42, 42, 50, 0.14);
+		position: relative;
+	}
+
+	.analysis-pitch canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.analysis-pitch .panel-label.sub {
+		font-size: 10px;
+		top: 12px;
+		letter-spacing: 2px;
+	}
+
+	.analysis-scope {
+		height: 22%;
+		min-height: 50px;
+		border-top: 1px solid rgba(42, 42, 50, 0.14);
+		position: relative;
+	}
+
+	.analysis-scope canvas {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.panel-label.sub {
 		font-size: 9px;
-		text-transform: uppercase;
-		letter-spacing: 0.6px;
-		color: rgba(140, 140, 170, 0.4);
+		color: rgba(42, 42, 50, 0.3);
 	}
 
-	.toggle-group { display: flex; }
+	/* ── Controls bar ────────────────────────────── */
+	.controls-bar {
+		position: relative;
+		display: flex;
+		align-items: flex-end;
+		--control-height: 28px;
+		padding: 28px 28px 32px;
+		gap: 0;
+	}
+
+	/* ── Brand ────────────────────────────────────── */
+	.ctrl-brand {
+		display: flex;
+		align-items: flex-end;
+		gap: 14px;
+		padding-right: 22px;
+		padding-bottom: 15px;
+		flex-shrink: 0;
+	}
+
+	.brand-text {
+		display: flex;
+		flex-direction: column;
+		line-height: 1.15;
+		margin-bottom:-4px;
+	}
+
+	.brand-top {
+		font-size: 15px;
+		font-weight: 600;
+		letter-spacing: 6px;
+		color: rgba(42, 42, 50, 0.48);
+	}
+
+	.brand-bottom {
+		font-size: 15px;
+		font-weight: 300;
+		letter-spacing: 6px;
+		color: rgba(42, 42, 50, 0.28);
+	}
+
+	/* ── Separator ───────────────────────────────── */
+	.ctrl-sep {
+		width: 1px;
+		height: 40px;
+		background: rgba(42, 42, 50, 0.10);
+		flex-shrink: 0;
+		align-self: flex-end;
+	}
+
+	/* ── Sections ────────────────────────────────── */
+	.ctrl-section {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 0 18px;
+		min-width: 0;
+	}
+
+	.ctrl-section.grow {
+		flex: 1;
+	}
+
+	.section-label {
+		display: block;
+		height: 10px;
+		font-size: 9px;
+		font-weight: 500;
+		letter-spacing: 2.5px;
+		color: rgba(42, 42, 50, 0.28);
+		line-height: 1;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.section-body {
+		display: flex;
+		align-items: flex-end;
+		gap: 8px;
+		flex-wrap: nowrap;
+		min-width: 0;
+	}
+
+	/* ── Play button ─────────────────────────────── */
+	.ctrl-btn.play {
+		width: 30px;
+		height: 30px;
+		padding: 0;
+		border: 1.5px solid rgba(42, 42, 50, 0.18);
+		border-radius: 50%;
+		background: transparent;
+		color: rgba(42, 42, 50, 0.45);
+		font-family: inherit;
+		cursor: pointer;
+		transition: all 0.15s;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+	}
+
+	.ctrl-btn.play:hover {
+		border-color: rgba(42, 42, 50, 0.35);
+		background: rgba(42, 42, 50, 0.03);
+	}
+
+	.ctrl-btn.play.active {
+		border-color: rgba(160, 50, 50, 0.35);
+		background: rgba(160, 50, 50, 0.04);
+	}
+
+	.icon-play {
+		width: 0;
+		height: 0;
+		border-style: solid;
+		border-width: 4px 0 4px 7px;
+		border-color: transparent transparent transparent rgba(42, 42, 50, 0.5);
+		flex-shrink: 0;
+		margin-left: 1px;
+	}
+
+	.icon-stop {
+		width: 8px;
+		height: 8px;
+		background: rgba(160, 50, 50, 0.5);
+		border-radius: 2px;
+		flex-shrink: 0;
+	}
+
+	/* ── Input toggle ────────────────────────────── */
+	.input-toggle {
+		display: flex;
+		height: var(--control-height);
+		box-sizing: border-box;
+		align-items: stretch;
+		border: 1px solid rgba(42, 42, 50, 0.12);
+		border-radius: 4px;
+		overflow: hidden;
+	}
 
 	.toggle-btn {
-		padding: 3px 9px;
-		border: 1px solid rgba(80, 80, 120, 0.2);
+		height: 100%;
+		padding: 0 12px;
+		border: none;
 		background: transparent;
-		color: rgba(140, 140, 170, 0.4);
+		color: rgba(42, 42, 50, 0.35);
+		font-family: inherit;
 		font-size: 10px;
+		font-weight: 500;
+		letter-spacing: 2px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 		cursor: pointer;
 		transition: all 0.12s;
 	}
-	.toggle-btn:first-child { border-radius: 3px 0 0 3px; }
-	.toggle-btn:last-child { border-radius: 0 3px 3px 0; }
+
+	.toggle-btn:hover {
+		color: rgba(42, 42, 50, 0.6);
+		background: rgba(42, 42, 50, 0.02);
+	}
+
 	.toggle-btn.active {
-		background: rgba(100, 160, 255, 0.08);
-		color: rgba(140, 180, 255, 0.75);
-		border-color: rgba(100, 160, 255, 0.25);
+		color: rgba(42, 42, 50, 0.7);
+		background: rgba(42, 42, 50, 0.05);
 	}
-	.toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
-	.slider { width: 90px; accent-color: rgba(100, 160, 255, 0.5); }
+	.toggle-btn:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
+	}
 
-	.file-input { font-size: 10px; color: rgba(140, 140, 170, 0.45); }
-	.file-input::file-selector-button {
-		padding: 3px 7px;
-		border: 1px solid rgba(80, 80, 120, 0.2);
+	.toggle-btn + .toggle-btn {
+		border-left: 1px solid rgba(42, 42, 50, 0.08);
+	}
+
+	.file-btn {
+		height: var(--control-height);
+		box-sizing: border-box;
+		padding: 0 12px;
+		border: 1px dashed rgba(42, 42, 50, 0.18);
+		border-radius: 4px;
 		background: transparent;
-		color: rgba(140, 140, 170, 0.45);
-		border-radius: 3px;
-		cursor: pointer;
+		color: rgba(42, 42, 50, 0.4);
+		font-family: inherit;
 		font-size: 10px;
+		font-weight: 400;
+		letter-spacing: 1px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		transition: border-color 0.12s;
+		position: relative;
 	}
 
-	.status-fps {
-		margin-left: auto;
+	.file-btn:hover {
+		border-color: rgba(42, 42, 50, 0.3);
+	}
+
+	.file-hidden {
+		position: absolute;
+		width: 0;
+		height: 0;
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	/* ── Parameters ──────────────────────────────── */
+	.params-body {
+		gap: 16px;
+		min-width: 0;
+	}
+
+	.param {
 		display: flex;
-		flex-direction: column;
-		align-items: flex-end;
-		gap: 1px;
+		align-items: center;
+		gap: 9px;
 	}
 
-	.status { font-size: 10px; color: rgba(140, 180, 255, 0.4); }
-	.fps { font-size: 10px; font-variant-numeric: tabular-nums; color: rgba(100, 100, 130, 0.35); }
+	.param-label {
+		font-size: 10px;
+		font-weight: 500;
+		letter-spacing: 2px;
+		color: rgba(42, 42, 50, 0.38);
+		white-space: nowrap;
+	}
+
+	.param-wheel {
+		position: relative;
+		width: 120px;
+		min-width: 60px;
+		height: 24px;
+		display: flex;
+		align-items: center;
+		flex-shrink: 1;
+	}
+
+	.param-wheel::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: 50%;
+		height: 14px;
+		transform: translateY(-50%);
+		background: repeating-linear-gradient(
+			to right,
+			rgba(42, 42, 50, 0.22) 0px,
+			rgba(42, 42, 50, 0.22) 1px,
+			transparent 1px,
+			transparent 8px
+		);
+		opacity: 0.8;
+		pointer-events: none;
+	}
+
+	.param-wheel::after {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: 50%;
+		height: 1px;
+		transform: translateY(-50%);
+		background: rgba(42, 42, 50, 0.1);
+		pointer-events: none;
+	}
+
+	.wheel-slider {
+		-webkit-appearance: none;
+		appearance: none;
+		width: 100%;
+		height: 24px;
+		background: transparent;
+		border-radius: 0;
+		outline: none;
+		cursor: pointer;
+		position: relative;
+		z-index: 1;
+	}
+
+	.wheel-slider::-webkit-slider-runnable-track {
+		height: 24px;
+		background: transparent;
+	}
+
+	.wheel-slider::-webkit-slider-thumb {
+		-webkit-appearance: none;
+		width: 2px;
+		height: 20px;
+		margin-top: 2px;
+		border-radius: 1px;
+		background: rgba(42, 42, 50, 0.55);
+		border: none;
+		cursor: pointer;
+		transition: background 0.12s;
+	}
+
+	.wheel-slider::-webkit-slider-thumb:hover {
+		background: rgba(42, 42, 50, 0.75);
+	}
+
+	.wheel-slider::-moz-range-track {
+		height: 24px;
+		background: transparent;
+	}
+
+	.wheel-slider::-moz-range-thumb {
+		width: 2px;
+		height: 20px;
+		border-radius: 1px;
+		background: rgba(42, 42, 50, 0.55);
+		border: none;
+		cursor: pointer;
+	}
+
+	.param-readout {
+		width: 32px;
+		font-size: 10px;
+		font-weight: 400;
+		letter-spacing: 1px;
+		text-align: right;
+		color: rgba(42, 42, 50, 0.34);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* ── Filter selects ─────────────────────────── */
+	.filter-group {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-left: 8px;
+		padding-left: 12px;
+		border-left: 1px solid rgba(42, 42, 50, 0.08);
+		flex-shrink: 1;
+		min-width: 0;
+	}
+
+	.filter-sel {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+
+	.filter-sel select {
+		height: var(--control-height);
+		box-sizing: border-box;
+		padding: 0 5px;
+		border: 1px solid rgba(42, 42, 50, 0.1);
+		border-radius: 3px;
+		background: transparent;
+		color: rgba(42, 42, 50, 0.55);
+		font-family: inherit;
+		font-size: 10px;
+		font-weight: 400;
+		cursor: pointer;
+		outline: none;
+		transition: border-color 0.12s;
+	}
+
+	.filter-sel select:hover { border-color: rgba(42, 42, 50, 0.22); }
+	.filter-sel select:focus { border-color: rgba(42, 42, 50, 0.3); }
+
+	/* ── FPS ──────────────────────────────────────── */
+	.ctrl-fps {
+		display: flex;
+		align-items: baseline;
+		gap: 4px;
+		margin-left: auto;
+		padding-left: 16px;
+		flex-shrink: 0;
+		align-self: flex-end;
+	}
+
+	.fps-number {
+		font-size: 14px;
+		font-weight: 300;
+		color: rgba(42, 42, 50, 0.30);
+		font-variant-numeric: tabular-nums;
+		line-height: 1;
+	}
+
+	.fps-label {
+		font-size: 8px;
+		font-weight: 500;
+		letter-spacing: 2px;
+		color: rgba(42, 42, 50, 0.20);
+	}
+
+	/* ── Status badge ────────────────────────────── */
+	.status-badge {
+		display: inline-block;
+		width: 72px;
+		padding: 4px 0;
+		text-align: center;
+		font-size: 9px;
+		font-weight: 500;
+		letter-spacing: 2px;
+		color: rgba(42, 42, 50, 0.35);
+		border: 1px solid rgba(42, 42, 50, 0.12);
+		border-radius: 3px;
+		background: transparent;
+		transition: color 0.2s, border-color 0.2s;
+		flex-shrink: 0;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.status-badge.active {
+		color: rgba(160, 50, 50, 0.7);
+		border-color: rgba(160, 50, 50, 0.25);
+	}
+
+	.design-credit {
+		position: absolute;
+		bottom: 29px;
+		left: 28px;
+		font-size: 9px;
+		font-weight: 600;
+		letter-spacing: 0.35px;
+		color: rgba(34, 34, 41, 0.25);
+		text-decoration: none;
+		text-transform: lowercase;
+		transition: color 0.15s ease;
+		white-space: nowrap;
+	}
+
+	.design-credit span {
+		font-weight: 800;
+		letter-spacing: 1.2px;
+		border-bottom: 1px solid rgba(42, 42, 50, 0.18);
+		padding-bottom: 1px;
+	}
+
+	.design-credit:hover {
+		color: rgba(42, 42, 50, 0.45);
+	}
+
+	/* ── Desktop: card wrappers are transparent ─── */
+	.cards-viewport { display: contents; }
+	.cards-track { display: contents; }
+	.mobile-header { display: none; }
+	.card-indicator { display: none; }
+	.mobile-credit { display: none; }
+
+	/* ── Responsive (desktop) ────────────────────── */
+	@media (max-width: 1200px) {
+		.ctrl-section { padding: 0 12px; }
+		.ctrl-brand { padding-right: 14px; }
+		.param-wheel { width: 90px; }
+		.filter-group { gap: 6px; padding-left: 8px; margin-left: 4px; }
+	}
+
+	@media (max-width: 960px) and (min-width: 769px) {
+		.controls-bar { padding: 10px 16px 28px; }
+		.ctrl-section { padding: 0 8px; }
+		.param-wheel { width: 70px; }
+		.filter-group { display: none; }
+		.ctrl-brand { gap: 8px; }
+		.brand-top, .brand-bottom { font-size: 13px; letter-spacing: 4px; }
+		.design-credit { left: 16px; bottom: 8px; }
+	}
+
+	/* ═══════════════════════════════════════════════
+	   MOBILE LAYOUT (≤768px)
+	   ═══════════════════════════════════════════════ */
+	@media (max-width: 768px) {
+		/* ── Main grid → flex column ──────────── */
+		main.mobile {
+			display: flex;
+			flex-direction: column;
+			grid-template-columns: unset;
+			grid-template-rows: unset;
+			grid-template-areas: unset;
+			gap: 0;
+			background: #f2ede4;
+		}
+
+		/* ── Mobile header ────────────────────── */
+		.mobile-header {
+			display: flex;
+			align-items: flex-end;
+			padding: 14px 18px 12px;
+			padding-top: calc(14px + env(safe-area-inset-top));
+			background: #f2ede4;
+			flex-shrink: 0;
+			z-index: 10;
+			border-bottom: 1px solid rgba(42, 42, 50, 0.10);
+			gap: 14px;
+		}
+
+		.mobile-brand {
+			display: flex;
+			flex-direction: column;
+			line-height: 1.15;
+			transform: translateY(3px);
+		}
+
+		.mobile-brand .brand-top {
+			font-size: 12px;
+			font-weight: 600;
+			letter-spacing: 5px;
+			color: rgba(42, 42, 50, 0.48);
+		}
+
+		.mobile-brand .brand-bottom {
+			font-size: 12px;
+			font-weight: 300;
+			letter-spacing: 5px;
+			color: rgba(42, 42, 50, 0.28);
+		}
+
+		.mobile-status {
+			width: auto;
+			min-width: 60px;
+			padding: 3px 8px;
+			font-size: 8px;
+			margin-left: auto;
+		}
+
+		.mobile-fps {
+			display: flex;
+			align-items: baseline;
+			gap: 3px;
+			flex-shrink: 0;
+		}
+
+		.mobile-fps .fps-number {
+			font-size: 12px;
+			font-weight: 300;
+			color: rgba(42, 42, 50, 0.25);
+			font-variant-numeric: tabular-nums;
+			line-height: 1;
+		}
+
+		.mobile-fps .fps-label {
+			font-size: 7px;
+			font-weight: 500;
+			letter-spacing: 1.5px;
+			color: rgba(42, 42, 50, 0.18);
+		}
+
+		/* ── Cards viewport (peek effect) ────── */
+		.cards-viewport {
+			display: block;
+			flex: 1;
+			min-height: 0;
+			overflow: hidden;
+			position: relative;
+		}
+
+		.cards-track {
+			display: flex;
+			margin-left: 14px;
+			height: 100%;
+			will-change: transform;
+		}
+
+		.cards-track > .panel {
+			width: calc(100vw - 28px);
+			flex-shrink: 0;
+			height: 100%;
+			box-sizing: border-box;
+			border-right: 1px solid rgba(42, 42, 50, 0.12);
+			touch-action: pan-y pinch-zoom;
+		}
+
+		.cards-track > .panel:first-child {
+			border-left: 1px solid rgba(42, 42, 50, 0.12);
+		}
+
+		/* ── Card indicator ───────────────────── */
+		.card-indicator {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			padding: 9px 18px;
+			background: #f2ede4;
+			flex-shrink: 0;
+			border-top: 1px solid rgba(42, 42, 50, 0.10);
+		}
+
+		.card-label {
+			font-size: 9px;
+			font-weight: 500;
+			letter-spacing: 2.5px;
+			color: rgba(42, 42, 50, 0.35);
+			min-width: 100px;
+		}
+
+		.card-dots {
+			display: flex;
+			gap: 6px;
+			align-items: center;
+		}
+
+		.card-dot {
+			width: 16px;
+			height: 2px;
+			padding: 0;
+			border: none;
+			background: rgba(42, 42, 50, 0.12);
+			cursor: pointer;
+			transition: all 0.3s ease;
+		}
+
+		.card-dot.active {
+			width: 24px;
+			background: rgba(42, 42, 50, 0.40);
+		}
+
+		/* ── Panel labels ────────────────────── */
+		.panel-label:not(.sub) {
+			display: none;
+		}
+
+		.panel-label.sub {
+			top: 8px;
+			left: 14px;
+			font-size: 8px;
+		}
+
+		.axes-overlay {
+			bottom: 12px;
+			left: 14px;
+			font-size: 9px;
+		}
+
+		/* ── Analysis panel ──────────────────── */
+		.analysis-radar {
+			--radar-label-font: 500 8px "JetBrains Mono";
+			--radar-label-radius-offset: 20;
+			--radar-value-font: 400 9px "JetBrains Mono";
+		}
+
+		/* ── Controls bar (mobile) ───────────── */
+		.controls-bar {
+			flex-direction: column;
+			align-items: stretch;
+			gap: 12px;
+			padding: 16px 18px 12px;
+			padding-bottom: calc(env(safe-area-inset-bottom));
+			flex-shrink: 0;
+			border-top: 1px solid rgba(42, 42, 50, 0.10);
+		}
+
+		/* Hide desktop-only elements */
+		.ctrl-brand { display: none; }
+		.ctrl-sep { display: none; }
+		.filter-group { display: none; }
+		.ctrl-fps { display: none; }
+
+		/* Section labels visible as row headers */
+		.section-label {
+			font-size: 8px;
+			letter-spacing: 2px;
+			color: rgba(42, 42, 50, 0.22);
+			height: auto;
+			margin-bottom: 6px;
+		}
+
+		/* Input section */
+		.ctrl-section {
+			padding: 0;
+			gap: 0;
+		}
+
+		.controls-bar > .ctrl-section:not(.grow) .section-label {
+			display: none;
+		}
+
+		.controls-bar > .ctrl-section:first-of-type .section-body {
+			padding-right: 132px;
+		}
+
+		.section-body {
+			gap: 10px;
+			align-items: center;
+		}
+
+		.ctrl-btn.play {
+			width: 30px;
+			height: 30px;
+		}
+
+		.input-toggle {
+			height: 30px;
+		}
+
+		.toggle-btn {
+			padding: 0 12px;
+			font-size: 9px;
+			letter-spacing: 1.5px;
+		}
+
+		.file-btn {
+			height: 30px;
+			padding: 0 10px;
+			font-size: 9px;
+		}
+
+		/* Parameters section: full-width volume */
+		.ctrl-section.grow {
+			flex: none;
+			width: 100%;
+		}
+
+		.params-body {
+			gap: 8px;
+		}
+
+		.param {
+			gap: 8px;
+			width: 100%;
+		}
+
+		.param-label {
+			font-size: 9px;
+			flex-shrink: 0;
+		}
+
+		.param-wheel {
+			flex: 1;
+			width: auto;
+			min-width: 0;
+		}
+
+		.param-readout {
+			width: 30px;
+			font-size: 9px;
+		}
+
+		/* ── Credit inside controls on mobile ──────────────── */
+		.design-credit {
+			display: none;
+		}
+
+		/* ── Mobile credit (very bottom of page) ─────────── */
+		.mobile-credit {
+			display: block;
+			text-align: left;
+			padding: 8px 18px;
+			padding-bottom: calc(15px + env(safe-area-inset-bottom));
+			font-size: 8px;
+			font-weight: 600;
+			letter-spacing: 0.35px;
+			color: rgba(34, 34, 41, 0.22);
+			text-decoration: none;
+			text-transform: lowercase;
+			flex-shrink: 0;
+			transition: color 0.15s ease;
+		}
+
+		.mobile-credit span {
+			font-weight: 800;
+			letter-spacing: 1px;
+			border-bottom: 1px solid rgba(42, 42, 50, 0.15);
+			padding-bottom: 1px;
+		}
+
+		.mobile-credit:hover {
+			color: rgba(42, 42, 50, 0.40);
+		}
+
+		/* ── Mel panel mobile adjustments ────── */
+		.mel-2d {
+			height: 12%;
+			min-height: 24px;
+		}
+	}
 </style>

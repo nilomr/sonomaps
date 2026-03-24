@@ -34,13 +34,22 @@ export class MelFeatureExtractor {
 	readonly logMelEnergies: Float32Array;          // log mel energies
 	readonly mfccs: Float32Array;                   // MFCC coefficients
 
+	/** Amplitude floor in dB — bins below this are zeroed. -100 = off. */
+	floorDb = -100;
+	/** Low-frequency cutoff in Hz (bandpass). 0 = off. */
+	minFreqHz = 0;
+	/** High-frequency cutoff in Hz (bandpass). Infinity = off. */
+	maxFreqHz = Infinity;
+
 	// Scalar features computed each frame
 	centroid = 0;       // spectral centroid (Hz)
 	rms = 0;            // RMS energy
 	zcr = 0;            // zero-crossing rate
 	flatness = 0;       // spectral flatness (0 = tonal, 1 = noise)
+	tonality = 0;       // spectral tonality (0 = noise-like, 1 = tonal/peaky)
 	bandwidth = 0;      // spectral bandwidth (Hz)
 	rolloff = 0;        // spectral rolloff (Hz)
+	peakFreq = 0;       // peak frequency (Hz) — bin with max power
 
 	constructor(config: MelConfig) {
 		const {
@@ -113,11 +122,19 @@ export class MelFeatureExtractor {
 	compute(freqData: Float32Array, timeData: Float32Array): void {
 		const numBins = this.numBins;
 
-		// ── Convert dB to linear power ───────────────────────
+		// ── Convert dB to linear power + floor/bandpass ──────
 		// AnalyserNode returns dB (typically -100 to -10).
-		// power = 10^(dB / 10)
+		// Fused loop: dB threshold + bandpass + power conversion.
+		const binHz = this.sampleRate / this.fftSize;
+		const minBin = Math.max(0, Math.floor(this.minFreqHz / binHz));
+		const maxBin = Math.min(numBins - 1, Math.ceil(this.maxFreqHz / binHz));
+		const floorDb = this.floorDb;
 		for (let k = 0; k < numBins; k++) {
-			this.powerBuf[k] = Math.pow(10, freqData[k] / 10);
+			if (k < minBin || k > maxBin || freqData[k] < floorDb) {
+				this.powerBuf[k] = 0;
+			} else {
+				this.powerBuf[k] = Math.pow(10, freqData[k] / 10);
+			}
 		}
 
 		// ── Mel filterbank ───────────────────────────────────
@@ -129,6 +146,23 @@ export class MelFeatureExtractor {
 			}
 			this.melEnergies[m] = energy;
 			this.logMelEnergies[m] = Math.log(energy + 1e-10);
+		}
+
+		// ── Tonality via mel spectral entropy ───────────────
+		// Uniform broadband spectrum -> high entropy -> low tonality.
+		// Peaky harmonic spectrum -> low entropy -> high tonality.
+		let melSum = 0;
+		for (let m = 0; m < this.numMelBands; m++) melSum += this.melEnergies[m];
+		if (melSum > 0) {
+			let entropy = 0;
+			for (let m = 0; m < this.numMelBands; m++) {
+				const p = this.melEnergies[m] / melSum;
+				if (p > 1e-12) entropy -= p * Math.log(p);
+			}
+			const maxEntropy = Math.log(this.numMelBands);
+			this.tonality = maxEntropy > 0 ? Math.max(0, Math.min(1, 1 - entropy / maxEntropy)) : 0;
+		} else {
+			this.tonality = 0;
 		}
 
 		// ── MFCCs via DCT ────────────────────────────────────
@@ -184,6 +218,17 @@ export class MelFeatureExtractor {
 			}
 		}
 		this.rolloff = rolloffBin * (this.sampleRate / this.fftSize);
+
+		// ── Peak frequency (Hz) ─────────────────────────────
+		let maxPow = 0;
+		let peakBin = 0;
+		for (let k = 1; k < numBins; k++) {
+			if (this.powerBuf[k] > maxPow) {
+				maxPow = this.powerBuf[k];
+				peakBin = k;
+			}
+		}
+		this.peakFreq = peakBin * (this.sampleRate / this.fftSize);
 
 		// ── RMS energy (from time-domain data) ───────────────
 		let sumSq = 0;
