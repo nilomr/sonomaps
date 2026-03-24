@@ -4,7 +4,7 @@ import adapter from '@sveltejs/adapter-static';
 const config = {
 	kit: {
 		// Use static adapter for GitHub Pages deployment
-		adapter: adapter(),
+		adapter: adapter({ fallback: '404.html' }),
 		paths: {
 			base: process.env.BASE_PATH || ''
 		}
