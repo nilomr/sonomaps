@@ -187,6 +187,85 @@ export const networkFragmentShader = /* glsl */ `
   }
 `;
 
+// ── Wireframe indicators (bounding box, crosshair, velocity) ──
+// Shared shader for all line-based HUD elements. A subtle time-based
+// pulse keeps them feeling alive; age/intensity drive per-vertex fade.
+
+export const wireVertexShader = /* glsl */ `
+  attribute float aAlpha;
+
+  varying float vAlpha;
+
+  void main() {
+    vAlpha = aAlpha;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+export const wireFragmentShader = /* glsl */ `
+  uniform float uTime;
+  uniform float uBaseAlpha;
+  uniform vec3  uColor;
+
+  varying float vAlpha;
+
+  void main() {
+    float pulse = 0.88 + 0.12 * sin(uTime * 2.4);
+    float alpha = vAlpha * uBaseAlpha * pulse;
+    gl_FragColor = vec4(uColor, alpha);
+  }
+`;
+
+// ── Peak markers ──────────────────────────────────────────
+// Hollow diamond glyphs at positions of high spectral flux.
+// They mark moments of rapid timbral change in the trajectory.
+
+export const markerVertexShader = /* glsl */ `
+  attribute float aMarkerAge;
+  attribute float aMarkerIntensity;
+
+  varying float vIntensity;
+  varying float vAge;
+
+  uniform float uPointSize;
+  uniform float uPixelRatio;
+  uniform float uTime;
+
+  void main() {
+    vIntensity = aMarkerIntensity;
+    vAge = aMarkerAge;
+
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+
+    float pulse = 0.82 + 0.18 * sin(uTime * 2.8 + aMarkerAge * 5.0);
+    float sizeScale = 0.5 + aMarkerIntensity * 0.7;
+    float ageFade = pow(max(0.0, 1.0 - aMarkerAge), 0.6);
+
+    gl_PointSize = uPointSize * uPixelRatio * sizeScale * pulse * ageFade * 14.0;
+    gl_Position  = projectionMatrix * mvPosition;
+  }
+`;
+
+export const markerFragmentShader = /* glsl */ `
+  varying float vIntensity;
+  varying float vAge;
+
+  void main() {
+    vec2 p = gl_PointCoord - 0.5;
+    // Diamond: |x|+|y| < 0.5
+    float d = abs(p.x) + abs(p.y);
+    if (d > 0.5) discard;
+    // Hollow interior
+    if (d < 0.30) discard;
+
+    float ageFade = pow(max(0.0, 1.0 - vAge), 0.8);
+    float alpha = ageFade * (0.30 + vIntensity * 0.45);
+
+    vec3 color = vec3(0.15, 0.13, 0.11);
+    gl_FragColor = vec4(color, alpha);
+  }
+`;
+
 // ── Mel cloud shaders ─────────────────────────────────────
 //
 // Particles use gaussian soft falloff so overlapping points

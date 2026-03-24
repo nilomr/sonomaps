@@ -4,7 +4,7 @@
 	import { MelFeatureExtractor } from '$lib/dsp/mel.js';
 	import { OnlinePCAEmbedding } from '$lib/embedding/pca.js';
 	import { EmbeddingSmoother } from '$lib/embedding/smoother.js';
-	import { PointCloudRenderer } from '$lib/render/point-cloud.js';
+	import { PointCloudRenderer, type TrajectoryMetrics } from '$lib/render/point-cloud.js';
 	import { MelCloudRenderer } from '$lib/render/mel-cloud.js';
 	import { SpectrogramRenderer } from '$lib/render/spectrogram.js';
 	import { OscilloscopeRenderer } from '$lib/render/oscilloscope.js';
@@ -67,6 +67,9 @@
 
 	// ── PCA calibration state ────────────────────────────
 	let pcaCalibrating = $state(false);
+
+	// ── Trajectory metrics (updated every frame) ─────────
+	let trajMetrics = $state<TrajectoryMetrics>({ spread: 0, drift: 0, flux: 0, segments: 0 });
 
 	// ── Feature display state (updated ~10Hz) ─────────────
 	let featCentroid = $state('—');
@@ -139,7 +142,7 @@
 	}
 
 	const FFT_SIZE = 1024;
-	const NUM_MEL_BANDS = 124;
+	const NUM_MEL_BANDS = 64;
 	const MAX_POINTS = 10000;
 	const SAMPLE_INTERVAL_MS = 4;
 	const MIN_GATE = 0.0005;
@@ -482,7 +485,10 @@
 			// Card order on mobile: 0=Analysis, 1=Mel, 2=Trajectory
 			if (!isMobile || currentCard === 0) renderRadar();
 			if (!isMobile || currentCard === 1) melCloud?.render();
-			if (!isMobile || currentCard === 2) pointCloud?.render();
+			if (!isMobile || currentCard === 2) {
+				pointCloud?.render();
+				if (pointCloud) trajMetrics = pointCloud.getMetrics();
+			}
 
 			// Oscilloscope + pitch gauge (Analysis card)
 			if (!isMobile || currentCard === 0) {
@@ -777,6 +783,26 @@
 						<span class="ax-key">Z</span> PC3
 					{/if}
 				</div>
+				{#if isRunning && !pcaCalibrating && trajMetrics.spread > 0}
+					<div class="traj-metrics">
+						<div class="tm-row">
+							<span class="tm-label">SPREAD</span>
+							<span class="tm-value">{trajMetrics.spread.toFixed(2)}</span>
+						</div>
+						<div class="tm-row">
+							<span class="tm-label">DRIFT</span>
+							<span class="tm-value">{trajMetrics.drift.toFixed(3)}</span>
+						</div>
+						<div class="tm-row">
+							<span class="tm-label">FLUX</span>
+							<span class="tm-value">{trajMetrics.flux.toFixed(3)}</span>
+						</div>
+						<div class="tm-row">
+							<span class="tm-label">LINKS</span>
+							<span class="tm-value">{trajMetrics.segments}</span>
+						</div>
+					</div>
+				{/if}
 			</section>
 		</div>
 	</div>
@@ -1015,6 +1041,42 @@
 		margin: 0 5px;
 		font-weight: 300;
 		color: rgba(42, 42, 50, 0.18);
+	}
+
+	/* ── Trajectory metrics overlay ──────────────── */
+	.traj-metrics {
+		position: absolute;
+		bottom: 18px;
+		right: 18px;
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		pointer-events: none;
+		z-index: 2;
+	}
+
+	.tm-row {
+		display: flex;
+		justify-content: flex-end;
+		align-items: baseline;
+		gap: 8px;
+	}
+
+	.tm-label {
+		font-size: 8px;
+		font-weight: 500;
+		letter-spacing: 2px;
+		color: rgba(42, 42, 50, 0.28);
+	}
+
+	.tm-value {
+		font-size: 10px;
+		font-weight: 400;
+		letter-spacing: 0.5px;
+		color: rgba(42, 42, 50, 0.45);
+		font-variant-numeric: tabular-nums;
+		min-width: 3.5em;
+		text-align: right;
 	}
 
 	/* ── Analysis layout ─────────────────────────── */
@@ -1714,8 +1776,8 @@
 			flex-direction: column;
 			align-items: stretch;
 			gap: 12px;
-			padding: 14px 18px 12px;
-			padding-bottom: calc(12px + env(safe-area-inset-bottom));
+			padding: 16px 18px 12px;
+			padding-bottom: calc(env(safe-area-inset-bottom));
 			flex-shrink: 0;
 			border-top: 1px solid rgba(42, 42, 50, 0.10);
 		}
@@ -1808,25 +1870,15 @@
 
 		/* ── Credit inside controls on mobile ──────────────── */
 		.design-credit {
-			display: block;
-			position: absolute;
-			top: 14px;
-			right: 18px;
-			left: auto;
-			bottom: auto;
-			transform: none;
-			font-size: 8px;
-			letter-spacing: 0.3px;
-			color: rgba(34, 34, 41, 0.24);
-			text-align: right;
+			display: none;
 		}
 
 		/* ── Mobile credit (very bottom of page) ─────────── */
 		.mobile-credit {
-			display: none;
-			text-align: center;
+			display: block;
+			text-align: left;
 			padding: 8px 18px;
-			padding-bottom: calc(8px + env(safe-area-inset-bottom));
+			padding-bottom: calc(15px + env(safe-area-inset-bottom));
 			font-size: 8px;
 			font-weight: 600;
 			letter-spacing: 0.35px;
