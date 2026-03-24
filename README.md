@@ -6,6 +6,8 @@ University of Oxford, but I might expand it to use more semantically interesting
 embedding models if I find the time. The goal is to provide a simple,
 interactive tool for exploring the structure of sound in real time.
 
+![SonoMaps screenshot](src/lib/assets/sonomaps-compressed.jpg)
+
 It takes live mic input or an uploaded audio file, extracts some spectral
 features in real time, then maps those features into several synchronized visual
 views: mel spectrogram, trajectory cloud, radar chart, waveform, and pitch gauge.
