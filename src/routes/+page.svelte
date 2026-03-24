@@ -930,6 +930,10 @@
 
 <style>
 	/* ── Reset & base ────────────────────────────── */
+	:global(html) {
+		height: -webkit-fill-available;
+	}
+
 	:global(body) {
 		margin: 0;
 		padding: 0;
@@ -938,12 +942,15 @@
 		font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
 		overflow: hidden;
 		-webkit-font-smoothing: antialiased;
+		min-height: 100vh;
+		min-height: -webkit-fill-available;
 	}
 
 	/* ── Grid layout ─────────────────────────────── */
 	main {
 		width: 100vw;
 		height: 100vh;
+		height: 100dvh;
 		display: grid;
 		grid-template-columns: 1fr 1fr 0.55fr;
 		grid-template-rows: 1fr auto;
@@ -1142,6 +1149,9 @@
 		align-items: flex-end;
 		--control-height: 28px;
 		padding: 28px 28px 32px;
+		padding-bottom: max(32px, calc(16px + env(safe-area-inset-bottom)));
+		padding-left: max(28px, env(safe-area-inset-left));
+		padding-right: max(28px, env(safe-area-inset-right));
 		gap: 0;
 	}
 
