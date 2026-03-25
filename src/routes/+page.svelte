@@ -1,14 +1,18 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { AudioSource } from '$lib/audio/audio-source.js';
-	import { MelFeatureExtractor } from '$lib/dsp/mel.js';
-	import { OnlinePCAEmbedding } from '$lib/embedding/pca.js';
-	import { EmbeddingSmoother } from '$lib/embedding/smoother.js';
-	import { PointCloudRenderer, type TrajectoryMetrics } from '$lib/render/point-cloud.js';
-	import { MelCloudRenderer } from '$lib/render/mel-cloud.js';
-	import { SpectrogramRenderer } from '$lib/render/spectrogram.js';
-	import { OscilloscopeRenderer } from '$lib/render/oscilloscope.js';
-	import { PitchGaugeRenderer } from '$lib/render/pitch-gauge.js';
+	import { onMount } from "svelte";
+	import { AudioSource } from "$lib/audio/audio-source.js";
+	import { MelFeatureExtractor } from "$lib/dsp/mel.js";
+	import { OnlinePCAEmbedding } from "$lib/embedding/pca.js";
+	import { EmbeddingSmoother } from "$lib/embedding/smoother.js";
+	import {
+		PointCloudRenderer,
+		type TrajectoryMetrics,
+	} from "$lib/render/point-cloud.js";
+	import { MelCloudRenderer } from "$lib/render/mel-cloud.js";
+	import { SpectrogramRenderer } from "$lib/render/spectrogram.js";
+	import { OscilloscopeRenderer } from "$lib/render/oscilloscope.js";
+	import { PitchGaugeRenderer } from "$lib/render/pitch-gauge.js";
+	import demoAudioUrl from "$lib/assets/jazz-guitar.mp3?url";
 
 	// ── DOM refs ───────────────────────────────────────────
 	let melCanvas: HTMLCanvasElement;
@@ -37,12 +41,17 @@
 	let animFrameId = 0;
 	let sampleIntervalId = 0;
 
+	// ── Landing state ────────────────────────────────────
+	let showLanding = $state(true);
+	let demoReady = $state(false);
+	let landingDismissing = $state(false);
+
 	// ── UI state ──────────────────────────────────────────
 	let isRunning = $state(false);
-	let inputMode = $state<'mic' | 'file'>('mic');
+	let inputMode = $state<"mic" | "file">("mic");
 	let fps = $state(0);
 	let selectedFile = $state<File | null>(null);
-	let status = $state('READY');
+	let status = $state("READY");
 	let volume = $state(1.0);
 	let noiseThreshold = $state(1.8);
 	let floorDb = $state(-100);
@@ -58,7 +67,7 @@
 	let isSwiping = $state(false);
 	let touchStartTime = 0;
 
-	const CARD_NAMES = ['ANALYSIS', 'MEL SPECTROGRAM', 'TRAJECTORY'];
+	const CARD_NAMES = ["ANALYSIS", "MEL SPECTROGRAM", "TRAJECTORY"];
 	const NUM_CARDS = 3;
 
 	// ── Fixed parameters ─────────────────────────────────
@@ -69,15 +78,20 @@
 	let pcaCalibrating = $state(false);
 
 	// ── Trajectory metrics (updated every frame) ─────────
-	let trajMetrics = $state<TrajectoryMetrics>({ spread: 0, drift: 0, flux: 0, segments: 0 });
+	let trajMetrics = $state<TrajectoryMetrics>({
+		spread: 0,
+		drift: 0,
+		flux: 0,
+		segments: 0,
+	});
 
 	// ── Feature display state (updated ~10Hz) ─────────────
-	let featCentroid = $state('—');
-	let featRms = $state('—');
-	let featZcr = $state('—');
-	let featFlat = $state('—');
-	let featBw = $state('—');
-	let featRol = $state('—');
+	let featCentroid = $state("—");
+	let featRms = $state("—");
+	let featZcr = $state("—");
+	let featFlat = $state("—");
+	let featBw = $state("—");
+	let featRol = $state("—");
 	let barCentroid = $state(0);
 	let barRms = $state(0);
 	let barZcr = $state(0);
@@ -109,16 +123,23 @@
 		radarCos[i] = Math.cos(a);
 		radarSin[i] = Math.sin(a);
 	}
-	const RADAR_LABELS = ['Centroid', 'Energy', 'Cross.', 'Tonality', 'Spread', 'Rolloff'];
+	const RADAR_LABELS = [
+		"Centroid",
+		"Energy",
+		"Cross.",
+		"Tonality",
+		"Spread",
+		"Rolloff",
+	];
 
 	const radarTextStyle = {
 		labelFont: '500 10px "JetBrains Mono"',
-		labelColor: 'rgba(42,42,50,0.94)',
+		labelColor: "rgba(42,42,50,0.94)",
 		labelRadiusOffset: 24,
 		labelYOffset: -8,
 		valueFont: '400 10px "JetBrains Mono"',
-		valueColor: 'rgba(42,42,50,0.40)',
-		valueYOffset: 11
+		valueColor: "rgba(42,42,50,0.40)",
+		valueYOffset: 11,
 	};
 
 	function readRadarTextStyle(): void {
@@ -126,19 +147,36 @@
 		const host = radarCanvas.parentElement ?? radarCanvas;
 		const s = getComputedStyle(host);
 
-		radarTextStyle.labelFont = s.getPropertyValue('--radar-label-font').trim() || radarTextStyle.labelFont;
-		radarTextStyle.labelColor = s.getPropertyValue('--radar-label-color').trim() || radarTextStyle.labelColor;
-		radarTextStyle.valueFont = s.getPropertyValue('--radar-value-font').trim() || radarTextStyle.valueFont;
-		radarTextStyle.valueColor = s.getPropertyValue('--radar-value-color').trim() || radarTextStyle.valueColor;
+		radarTextStyle.labelFont =
+			s.getPropertyValue("--radar-label-font").trim() ||
+			radarTextStyle.labelFont;
+		radarTextStyle.labelColor =
+			s.getPropertyValue("--radar-label-color").trim() ||
+			radarTextStyle.labelColor;
+		radarTextStyle.valueFont =
+			s.getPropertyValue("--radar-value-font").trim() ||
+			radarTextStyle.valueFont;
+		radarTextStyle.valueColor =
+			s.getPropertyValue("--radar-value-color").trim() ||
+			radarTextStyle.valueColor;
 
-		const labelRadiusOffset = parseFloat(s.getPropertyValue('--radar-label-radius-offset'));
-		if (!Number.isNaN(labelRadiusOffset)) radarTextStyle.labelRadiusOffset = labelRadiusOffset;
+		const labelRadiusOffset = parseFloat(
+			s.getPropertyValue("--radar-label-radius-offset"),
+		);
+		if (!Number.isNaN(labelRadiusOffset))
+			radarTextStyle.labelRadiusOffset = labelRadiusOffset;
 
-		const labelYOffset = parseFloat(s.getPropertyValue('--radar-label-y-offset'));
-		if (!Number.isNaN(labelYOffset)) radarTextStyle.labelYOffset = labelYOffset;
+		const labelYOffset = parseFloat(
+			s.getPropertyValue("--radar-label-y-offset"),
+		);
+		if (!Number.isNaN(labelYOffset))
+			radarTextStyle.labelYOffset = labelYOffset;
 
-		const valueYOffset = parseFloat(s.getPropertyValue('--radar-value-y-offset'));
-		if (!Number.isNaN(valueYOffset)) radarTextStyle.valueYOffset = valueYOffset;
+		const valueYOffset = parseFloat(
+			s.getPropertyValue("--radar-value-y-offset"),
+		);
+		if (!Number.isNaN(valueYOffset))
+			radarTextStyle.valueYOffset = valueYOffset;
 	}
 
 	const FFT_SIZE = 1024;
@@ -159,7 +197,11 @@
 	let warmupCount = 0;
 	const RENDER_DECAY = 0.95;
 
-	function normalizeForRendering(raw: number, ema: number, variance: number): number {
+	function normalizeForRendering(
+		raw: number,
+		ema: number,
+		variance: number,
+	): number {
 		const std = Math.sqrt(variance);
 		if (std < 1e-8) return 0.5;
 		return Math.max(0, Math.min(1, 0.5 + (raw - ema) / (4 * std)));
@@ -172,7 +214,9 @@
 		private count = 0;
 		private readonly decay: number;
 
-		constructor(decay = 0.995) { this.decay = decay; }
+		constructor(decay = 0.995) {
+			this.decay = decay;
+		}
 
 		update(raw: number): number {
 			this.count++;
@@ -189,7 +233,11 @@
 			return Math.max(0, Math.min(1, 0.5 + diff / (4 * std)));
 		}
 
-		reset(): void { this.mean = 0; this.variance = 1; this.count = 0; }
+		reset(): void {
+			this.mean = 0;
+			this.variance = 1;
+			this.count = 0;
+		}
 	}
 
 	const radarNorm = {
@@ -198,7 +246,7 @@
 		zcr: new FeatureNormalizer(),
 		flatness: new FeatureNormalizer(),
 		bandwidth: new FeatureNormalizer(),
-		rolloff: new FeatureNormalizer()
+		rolloff: new FeatureNormalizer(),
 	};
 
 	// ── Adaptive noise gate ──────────────────────────────
@@ -214,8 +262,8 @@
 
 	// ── Formatting helpers ───────────────────────────────
 	function fmtHz(hz: number): string {
-		if (hz >= 10000) return (hz / 1000).toFixed(0) + 'k';
-		if (hz >= 1000) return (hz / 1000).toFixed(1) + 'k';
+		if (hz >= 10000) return (hz / 1000).toFixed(0) + "k";
+		if (hz >= 1000) return (hz / 1000).toFixed(1) + "k";
 		return Math.round(hz).toString();
 	}
 
@@ -227,7 +275,14 @@
 
 	// ── High-frequency audio sampling (~250Hz) ───────────
 	function sampleAudio(): void {
-		if (!processing || !audioSource || !melExtractor || !embedding || !smoother) return;
+		if (
+			!processing ||
+			!audioSource ||
+			!melExtractor ||
+			!embedding ||
+			!smoother
+		)
+			return;
 
 		audioSource.read();
 		melExtractor.compute(audioSource.freqData, audioSource.timeData);
@@ -239,9 +294,12 @@
 			noiseFloorInitialized = true;
 		} else {
 			if (rms < noiseFloorEma * 2.0) {
-				noiseFloorEma = NOISE_FLOOR_DECAY * noiseFloorEma + (1 - NOISE_FLOOR_DECAY) * rms;
+				noiseFloorEma =
+					NOISE_FLOOR_DECAY * noiseFloorEma +
+					(1 - NOISE_FLOOR_DECAY) * rms;
 			} else if (rms < noiseFloorEma * 5.0) {
-				noiseFloorEma = NOISE_FLOOR_UP * noiseFloorEma + (1 - NOISE_FLOOR_UP) * rms;
+				noiseFloorEma =
+					NOISE_FLOOR_UP * noiseFloorEma + (1 - NOISE_FLOOR_UP) * rms;
 			}
 		}
 
@@ -264,14 +322,21 @@
 		} else {
 			energyEma = RENDER_DECAY * energyEma + (1 - RENDER_DECAY) * logRms;
 			const eDiff = logRms - energyEma;
-			energyVar = RENDER_DECAY * energyVar + (1 - RENDER_DECAY) * eDiff * eDiff;
-			centroidEma = RENDER_DECAY * centroidEma + (1 - RENDER_DECAY) * logCentroid;
+			energyVar =
+				RENDER_DECAY * energyVar + (1 - RENDER_DECAY) * eDiff * eDiff;
+			centroidEma =
+				RENDER_DECAY * centroidEma + (1 - RENDER_DECAY) * logCentroid;
 			const cDiff = logCentroid - centroidEma;
-			centroidVar = RENDER_DECAY * centroidVar + (1 - RENDER_DECAY) * cDiff * cDiff;
+			centroidVar =
+				RENDER_DECAY * centroidVar + (1 - RENDER_DECAY) * cDiff * cDiff;
 		}
 
 		const normEnergy = normalizeForRendering(logRms, energyEma, energyVar);
-		const normCentroid = normalizeForRendering(logCentroid, centroidEma, centroidVar);
+		const normCentroid = normalizeForRendering(
+			logCentroid,
+			centroidEma,
+			centroidVar,
+		);
 
 		pointData[0] = embeddingBuf[0];
 		pointData[1] = embeddingBuf[1];
@@ -282,7 +347,10 @@
 	}
 
 	// ── HiDPI canvas helper ─────────────────────────────
-	function resizeHiDPI(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
+	function resizeHiDPI(
+		canvas: HTMLCanvasElement,
+		ctx: CanvasRenderingContext2D,
+	): void {
 		const dpr = window.devicePixelRatio || 1;
 		const w = Math.round(canvas.clientWidth);
 		const h = Math.round(canvas.clientHeight);
@@ -302,32 +370,37 @@
 		radarGridH = h;
 		readRadarTextStyle();
 		const dpr = window.devicePixelRatio || 1;
-		radarGridCanvas = new OffscreenCanvas(Math.round(w * dpr), Math.round(h * dpr));
-		const g = radarGridCanvas.getContext('2d')!;
+		radarGridCanvas = new OffscreenCanvas(
+			Math.round(w * dpr),
+			Math.round(h * dpr),
+		);
+		const g = radarGridCanvas.getContext("2d")!;
 		g.scale(dpr, dpr);
 
 		const cx = w / 2;
 		const cy = h / 2;
-		const radius = Math.min(w, h) * 0.30;
+		const radius = Math.min(w, h) * 0.3;
 
 		// Concentric rings
 		for (let ring = 1; ring <= 3; ring++) {
 			const r = radius * (ring / 3);
-			g.strokeStyle = ring === 3 ? 'rgba(42,42,50,0.14)' : 'rgba(42,42,50,0.06)';
+			g.strokeStyle =
+				ring === 3 ? "rgba(42,42,50,0.14)" : "rgba(42,42,50,0.06)";
 			g.lineWidth = 0.5;
 			g.beginPath();
 			for (let i = 0; i <= RADAR_N; i++) {
 				const idx = i % RADAR_N;
 				const x = cx + radarCos[idx] * r;
 				const y = cy + radarSin[idx] * r;
-				if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+				if (i === 0) g.moveTo(x, y);
+				else g.lineTo(x, y);
 			}
 			g.closePath();
 			g.stroke();
 		}
 
 		// Axis lines
-		g.strokeStyle = 'rgba(42,42,50,0.1)';
+		g.strokeStyle = "rgba(42,42,50,0.1)";
 		g.lineWidth = 0.5;
 		for (let i = 0; i < RADAR_N; i++) {
 			g.beginPath();
@@ -337,13 +410,17 @@
 		}
 
 		// Labels (static part — feature names)
-		g.textAlign = 'center';
-		g.textBaseline = 'middle';
+		g.textAlign = "center";
+		g.textBaseline = "middle";
 		g.fillStyle = radarTextStyle.labelColor;
 		g.font = radarTextStyle.labelFont;
 		const lr = radius + radarTextStyle.labelRadiusOffset;
 		for (let i = 0; i < RADAR_N; i++) {
-			g.fillText(RADAR_LABELS[i], cx + radarCos[i] * lr, cy + radarSin[i] * lr + radarTextStyle.labelYOffset);
+			g.fillText(
+				RADAR_LABELS[i],
+				cx + radarCos[i] * lr,
+				cy + radarSin[i] * lr + radarTextStyle.labelYOffset,
+			);
 		}
 	}
 
@@ -361,14 +438,25 @@
 
 		const cx = w / 2;
 		const cy = h / 2;
-		const radius = Math.min(w, h) * 0.30;
+		const radius = Math.min(w, h) * 0.3;
 
 		// Target bar values
 		const targets = [
-			barCentroid / 100, barRms / 100, barZcr / 100,
-			barFlat / 100, barBw / 100, barRol / 100
+			barCentroid / 100,
+			barRms / 100,
+			barZcr / 100,
+			barFlat / 100,
+			barBw / 100,
+			barRol / 100,
 		];
-		const vals = [featCentroid, featRms, featZcr, featFlat, featBw, featRol];
+		const vals = [
+			featCentroid,
+			featRms,
+			featZcr,
+			featFlat,
+			featBw,
+			featRol,
+		];
 
 		// Smooth interpolation every frame
 		for (let i = 0; i < RADAR_N; i++) {
@@ -393,7 +481,8 @@
 				const rv = radius * Math.max(0.03, snap[idx]);
 				const x = cx + radarCos[idx] * rv;
 				const y = cy + radarSin[idx] * rv;
-				if (i === 0) radarCtx.moveTo(x, y); else radarCtx.lineTo(x, y);
+				if (i === 0) radarCtx.moveTo(x, y);
+				else radarCtx.lineTo(x, y);
 			}
 			radarCtx.closePath();
 			radarCtx.fill();
@@ -406,42 +495,67 @@
 			const rv = radius * Math.max(0.03, radarSmooth[idx]);
 			const x = cx + radarCos[idx] * rv;
 			const y = cy + radarSin[idx] * rv;
-			if (i === 0) radarCtx.moveTo(x, y); else radarCtx.lineTo(x, y);
+			if (i === 0) radarCtx.moveTo(x, y);
+			else radarCtx.lineTo(x, y);
 		}
 		radarCtx.closePath();
-		radarCtx.fillStyle = 'rgba(42,42,50,0.045)';
+		radarCtx.fillStyle = "rgba(42,42,50,0.045)";
 		radarCtx.fill();
-		radarCtx.strokeStyle = 'rgba(42,42,50,0.38)';
+		radarCtx.strokeStyle = "rgba(42,42,50,0.38)";
 		radarCtx.lineWidth = 1.5;
 		radarCtx.stroke();
 
 		// Vertex dots (single fillStyle, batch arcs)
-		radarCtx.fillStyle = 'rgba(42,42,50,0.5)';
+		radarCtx.fillStyle = "rgba(42,42,50,0.5)";
 		for (let i = 0; i < RADAR_N; i++) {
 			const rv = radius * Math.max(0.03, radarSmooth[i]);
 			radarCtx.beginPath();
-			radarCtx.arc(cx + radarCos[i] * rv, cy + radarSin[i] * rv, 2.5, 0, Math.PI * 2);
+			radarCtx.arc(
+				cx + radarCos[i] * rv,
+				cy + radarSin[i] * rv,
+				2.5,
+				0,
+				Math.PI * 2,
+			);
 			radarCtx.fill();
 		}
 
 		// Value labels (dynamic — update every frame for smooth text)
-		radarCtx.textAlign = 'center';
-		radarCtx.textBaseline = 'middle';
+		radarCtx.textAlign = "center";
+		radarCtx.textBaseline = "middle";
 		radarCtx.fillStyle = radarTextStyle.valueColor;
 		radarCtx.font = radarTextStyle.valueFont;
 		const lr = radius + radarTextStyle.labelRadiusOffset;
 		for (let i = 0; i < RADAR_N; i++) {
-			radarCtx.fillText(vals[i], cx + radarCos[i] * lr, cy + radarSin[i] * lr + radarTextStyle.valueYOffset);
+			radarCtx.fillText(
+				vals[i],
+				cx + radarCos[i] * lr,
+				cy + radarSin[i] * lr + radarTextStyle.valueYOffset,
+			);
 		}
 	}
 
 	// ── Lifecycle ─────────────────────────────────────────
 	onMount(() => {
-		radarCtx = radarCanvas.getContext('2d');
+		// Pre-load the bundled demo file so users can play immediately
+		fetch(demoAudioUrl)
+			.then((r) => r.blob())
+			.then((blob) => {
+				selectedFile = new File([blob], "jazz-guitar.mp3", {
+					type: "audio/mpeg",
+				});
+				inputMode = "file";
+				demoReady = true;
+			})
+			.catch(() => {
+				demoReady = true; /* demo unavailable, still allow mic */
+			});
+
+		radarCtx = radarCanvas.getContext("2d");
 
 		melCloud = new MelCloudRenderer(melCanvas, {
 			maxFrames: 400,
-			numBands: NUM_MEL_BANDS
+			numBands: NUM_MEL_BANDS,
 		});
 
 		spectrogram = new SpectrogramRenderer(spectroCanvas, NUM_MEL_BANDS);
@@ -451,21 +565,26 @@
 		pointCloud = new PointCloudRenderer(pointCanvas, {
 			maxPoints: MAX_POINTS,
 			outputDim,
-			pointSize: 1
+			pointSize: 1,
 		});
 
 		// ── Mobile detection ──────────────────────────
-		const mql = window.matchMedia('(max-width: 768px)');
+		const mql = window.matchMedia("(max-width: 768px)");
 		isMobile = mql.matches;
 		const onMqlChange = (e: MediaQueryListEvent) => {
 			isMobile = e.matches;
-			if (!isMobile) { currentCard = 0; touchDeltaX = 0; }
+			if (!isMobile) {
+				currentCard = 0;
+				touchDeltaX = 0;
+			}
 		};
-		mql.addEventListener('change', onMqlChange);
+		mql.addEventListener("change", onMqlChange);
 
 		// Non-passive touchmove for preventDefault
 		if (cardsViewport) {
-			cardsViewport.addEventListener('touchmove', onTouchMove, { passive: false });
+			cardsViewport.addEventListener("touchmove", onTouchMove, {
+				passive: false,
+			});
 		}
 
 		const onResize = () => {
@@ -473,7 +592,7 @@
 			spectrogram?.resize();
 			pointCloud?.resize();
 		};
-		window.addEventListener('resize', onResize);
+		window.addEventListener("resize", onResize);
 
 		function loop() {
 			if (processing && melExtractor) {
@@ -494,7 +613,10 @@
 			if (!isMobile || currentCard === 0) {
 				if (processing && audioSource) {
 					scope?.draw(audioSource.timeData);
-					pitchGauge?.draw(melExtractor?.peakFreq ?? 0, melExtractor?.rms ?? 0);
+					pitchGauge?.draw(
+						melExtractor?.peakFreq ?? 0,
+						melExtractor?.rms ?? 0,
+					);
 				} else {
 					scope?.draw(new Float32Array(0));
 					pitchGauge?.draw(0, 0);
@@ -508,25 +630,35 @@
 				const gate = Math.max(noiseFloorEma * noiseThreshold, MIN_GATE);
 				if (m.rms >= gate) {
 					featCentroid = fmtHz(m.centroid);
-					barCentroid = radarNorm.centroid.update(Math.log1p(m.centroid)) * 100;
+					barCentroid =
+						radarNorm.centroid.update(Math.log1p(m.centroid)) * 100;
 					featRms = m.rms.toFixed(3);
-					barRms = radarNorm.rms.update(Math.log1p(m.rms * 1000)) * 100;
+					barRms =
+						radarNorm.rms.update(Math.log1p(m.rms * 1000)) * 100;
 					featZcr = m.zcr.toFixed(3);
 					barZcr = radarNorm.zcr.update(m.zcr) * 100;
 					const tonality = m.tonality;
 					featFlat = fmtTonality(tonality);
 					barFlat = radarNorm.flatness.update(tonality) * 100;
 					featBw = fmtHz(m.bandwidth);
-					barBw = radarNorm.bandwidth.update(Math.log1p(m.bandwidth)) * 100;
+					barBw =
+						radarNorm.bandwidth.update(Math.log1p(m.bandwidth)) *
+						100;
 					featRol = fmtHz(m.rolloff);
-					barRol = radarNorm.rolloff.update(Math.log1p(m.rolloff)) * 100;
+					barRol =
+						radarNorm.rolloff.update(Math.log1p(m.rolloff)) * 100;
 
 					// Add radar trail snapshot
 					radarSnapshots.push([
-						barCentroid / 100, barRms / 100, barZcr / 100,
-						barFlat / 100, barBw / 100, barRol / 100
+						barCentroid / 100,
+						barRms / 100,
+						barZcr / 100,
+						barFlat / 100,
+						barBw / 100,
+						barRol / 100,
 					]);
-					if (radarSnapshots.length > RADAR_TRAIL_LENGTH) radarSnapshots.shift();
+					if (radarSnapshots.length > RADAR_TRAIL_LENGTH)
+						radarSnapshots.shift();
 				}
 			}
 
@@ -546,9 +678,9 @@
 		return () => {
 			cancelAnimationFrame(animFrameId);
 			clearInterval(sampleIntervalId);
-			window.removeEventListener('resize', onResize);
-			mql.removeEventListener('change', onMqlChange);
-			cardsViewport?.removeEventListener('touchmove', onTouchMove);
+			window.removeEventListener("resize", onResize);
+			mql.removeEventListener("change", onMqlChange);
+			cardsViewport?.removeEventListener("touchmove", onTouchMove);
 			stop();
 			melCloud?.dispose();
 			pointCloud?.dispose();
@@ -558,15 +690,15 @@
 	async function start() {
 		if (isRunning) return;
 		try {
-			status = 'INIT';
+			status = "INIT";
 			audioSource = new AudioSource(FFT_SIZE);
 
-			if (inputMode === 'mic') {
+			if (inputMode === "mic") {
 				await audioSource.startMic();
 			} else if (selectedFile) {
 				await audioSource.startFile(selectedFile);
 			} else {
-				status = 'NO FILE';
+				status = "NO FILE";
 				return;
 			}
 
@@ -576,7 +708,7 @@
 				sampleRate: audioSource.sampleRate,
 				fftSize: FFT_SIZE,
 				numMelBands: NUM_MEL_BANDS,
-				numMfccs: 13
+				numMfccs: 13,
 			});
 			melExtractor.floorDb = floorDb;
 			melExtractor.minFreqHz = freqLo;
@@ -585,10 +717,13 @@
 			embedding = new OnlinePCAEmbedding();
 			smoother = new EmbeddingSmoother(outputDim, smoothing);
 
-			energyEma = 0; energyVar = 0.01;
-			centroidEma = 0; centroidVar = 1;
+			energyEma = 0;
+			energyVar = 0.01;
+			centroidEma = 0;
+			centroidVar = 1;
 			warmupCount = 0;
-			noiseFloorEma = 0; noiseFloorInitialized = false;
+			noiseFloorEma = 0;
+			noiseFloorInitialized = false;
 			radarSnapshots = [];
 			for (const n of Object.values(radarNorm)) n.reset();
 
@@ -597,9 +732,12 @@
 			pitchGauge?.reset();
 
 			processing = true;
-			sampleIntervalId = window.setInterval(sampleAudio, SAMPLE_INTERVAL_MS);
+			sampleIntervalId = window.setInterval(
+				sampleAudio,
+				SAMPLE_INTERVAL_MS,
+			);
 			isRunning = true;
-			status = inputMode === 'mic' ? 'LISTENING' : 'PLAYING';
+			status = inputMode === "mic" ? "LISTENING" : "PLAYING";
 		} catch (err) {
 			status = `ERR: ${err instanceof Error ? err.message : String(err)}`;
 		}
@@ -614,16 +752,34 @@
 		melExtractor = null;
 		embedding = null;
 		smoother = null;
-		status = 'READY';
-		featCentroid = '—'; featRms = '—'; featZcr = '—';
-		featFlat = '—'; featBw = '—'; featRol = '—';
-		barCentroid = 0; barRms = 0; barZcr = 0;
-		barFlat = 0; barBw = 0; barRol = 0;
+		status = "READY";
+		featCentroid = "—";
+		featRms = "—";
+		featZcr = "—";
+		featFlat = "—";
+		featBw = "—";
+		featRol = "—";
+		barCentroid = 0;
+		barRms = 0;
+		barZcr = 0;
+		barFlat = 0;
+		barBw = 0;
+		barRol = 0;
 	}
 
 	function toggle() {
 		if (isRunning) stop();
 		else start();
+	}
+
+	function dismissLanding(mode: "file" | "mic") {
+		inputMode = mode;
+		landingDismissing = true;
+		// Start audio immediately (user gesture satisfies browser autoplay policy)
+		start();
+		setTimeout(() => {
+			showLanding = false;
+		}, 500);
 	}
 
 	function onFileChange(e: Event) {
@@ -669,7 +825,10 @@
 
 		e.preventDefault();
 		// Rubber band at edges
-		if ((currentCard === 0 && dx > 0) || (currentCard === NUM_CARDS - 1 && dx < 0)) {
+		if (
+			(currentCard === 0 && dx > 0) ||
+			(currentCard === NUM_CARDS - 1 && dx < 0)
+		) {
 			touchDeltaX = dx * 0.25;
 		} else {
 			touchDeltaX = dx;
@@ -712,21 +871,73 @@
 
 <svelte:head>
 	<title>SonoMaps</title>
-	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+	<meta
+		name="viewport"
+		content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+	/>
 	<meta name="theme-color" content="#f2ede4" />
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
-	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
-	<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet" />
+	<link
+		rel="preconnect"
+		href="https://fonts.gstatic.com"
+		crossorigin="anonymous"
+	/>
+	<link
+		href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&display=swap"
+		rel="stylesheet"
+	/>
 </svelte:head>
 
 <main class:mobile={isMobile}>
+	<!-- ─── Landing overlay ─── -->
+	{#if showLanding}
+		<div class="landing" class:dismissing={landingDismissing}>
+			<div class="landing-content">
+				<div class="landing-brand">
+					<span class="landing-top">SONO</span>
+					<span class="landing-bottom">MAPS</span>
+				</div>
+				<p class="landing-tagline">
+					Real-time audio analysis<br />and visualisation
+				</p>
+
+				{#if demoReady}
+					<div class="landing-actions">
+						{#if selectedFile}
+							<button
+								class="landing-cta"
+								onclick={() => dismissLanding("file")}
+							>
+								<span class="cta-icon"></span>
+								<span class="cta-text">PLAY DEMO</span>
+							</button>
+						{/if}
+						<button
+							class="landing-alt"
+							onclick={() => dismissLanding("mic")}
+							>USE MICROPHONE</button
+						>
+					</div>
+				{:else}
+					<div class="landing-loading">
+						<span class="loading-dot"></span>
+						<span class="loading-dot"></span>
+						<span class="loading-dot"></span>
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
 	<!-- ─── Mobile header ─── -->
 	<header class="mobile-header">
 		<div class="mobile-brand">
 			<span class="brand-top">SONO</span>
 			<span class="brand-bottom">MAPS</span>
 		</div>
-		<span class="status-badge mobile-status" class:active={isRunning}>{status}</span>
+		<span class="status-badge mobile-status" class:active={isRunning}
+			>{status}</span
+		>
 		<div class="mobile-fps">
 			<span class="fps-number">{fps}</span>
 			<span class="fps-label">FPS</span>
@@ -734,17 +945,25 @@
 	</header>
 
 	<!-- ─── Card viewport (wraps all viz panels) ─── -->
-	<div class="cards-viewport" bind:this={cardsViewport}
-		role="region" aria-label="Visualization cards"
+	<div
+		class="cards-viewport"
+		bind:this={cardsViewport}
+		role="region"
+		aria-label="Visualization cards"
 		ontouchstart={onTouchStart}
-		ontouchend={onTouchEnd}>
-		<div class="cards-track"
-			style={isMobile ? `transform:translateX(calc(${-currentCard} * (100vw - 28px) + ${touchDeltaX}px));${isSwiping ? '' : 'transition:transform 0.35s cubic-bezier(0.22,0.68,0.35,1)'}` : ''}>
-
+		ontouchend={onTouchEnd}
+	>
+		<div
+			class="cards-track"
+			style={isMobile
+				? `transform:translateX(calc(${-currentCard} * (100vw - 28px) + ${touchDeltaX}px));${isSwiping ? "" : "transition:transform 0.35s cubic-bezier(0.22,0.68,0.35,1)"}`
+				: ""}
+		>
 			<!-- ─── Analysis (card 0 on mobile) ─── -->
 			<section class="panel analysis">
 				<div class="analysis-radar">
-					<canvas bind:this={radarCanvas} class="fill-canvas"></canvas>
+					<canvas bind:this={radarCanvas} class="fill-canvas"
+					></canvas>
 				</div>
 				<div class="analysis-pitch">
 					<canvas bind:this={pitchCanvas}></canvas>
@@ -787,15 +1006,21 @@
 					<div class="traj-metrics">
 						<div class="tm-row">
 							<span class="tm-label">SPREAD</span>
-							<span class="tm-value">{trajMetrics.spread.toFixed(2)}</span>
+							<span class="tm-value"
+								>{trajMetrics.spread.toFixed(2)}</span
+							>
 						</div>
 						<div class="tm-row">
 							<span class="tm-label">DRIFT</span>
-							<span class="tm-value">{trajMetrics.drift.toFixed(3)}</span>
+							<span class="tm-value"
+								>{trajMetrics.drift.toFixed(3)}</span
+							>
 						</div>
 						<div class="tm-row">
 							<span class="tm-label">FLUX</span>
-							<span class="tm-value">{trajMetrics.flux.toFixed(3)}</span>
+							<span class="tm-value"
+								>{trajMetrics.flux.toFixed(3)}</span
+							>
 						</div>
 						<div class="tm-row">
 							<span class="tm-label">LINKS</span>
@@ -812,9 +1037,12 @@
 		<span class="card-label">{CARD_NAMES[currentCard]}</span>
 		<div class="card-dots">
 			{#each CARD_NAMES as _, i}
-				<button class="card-dot" class:active={currentCard === i}
+				<button
+					class="card-dot"
+					class:active={currentCard === i}
 					onclick={() => goToCard(i)}
-					aria-label={CARD_NAMES[i]}></button>
+					aria-label={CARD_NAMES[i]}
+				></button>
 			{/each}
 		</div>
 	</nav>
@@ -830,8 +1058,12 @@
 			<span class="status-badge" class:active={isRunning}>{status}</span>
 		</div>
 		<!-- Credit: absolutely positioned so it doesn't affect flex baseline -->
-		<a class="design-credit" href="https://sedum.studio" target="_blank"
-			rel="noopener noreferrer">designed by <span>sedum.studio</span></a>
+		<a
+			class="design-credit"
+			href="https://sedum.studio"
+			target="_blank"
+			rel="noopener noreferrer">designed by <span>sedum.studio</span></a
+		>
 
 		<div class="ctrl-sep"></div>
 
@@ -839,8 +1071,12 @@
 		<div class="ctrl-section">
 			<span class="section-label">INPUT</span>
 			<div class="section-body">
-				<button class="ctrl-btn play" class:active={isRunning} onclick={toggle}
-					aria-label={isRunning ? 'Stop' : 'Start'}>
+				<button
+					class="ctrl-btn play"
+					class:active={isRunning}
+					onclick={toggle}
+					aria-label={isRunning ? "Stop" : "Start"}
+				>
 					{#if isRunning}
 						<span class="icon-stop"></span>
 					{:else}
@@ -848,16 +1084,33 @@
 					{/if}
 				</button>
 				<div class="input-toggle">
-					<button class="toggle-btn" class:active={inputMode === 'mic'} disabled={isRunning}
-						onclick={() => (inputMode = 'mic')}>MIC</button>
-					<button class="toggle-btn" class:active={inputMode === 'file'} disabled={isRunning}
-						onclick={() => (inputMode = 'file')}>FILE</button>
+					<button
+						class="toggle-btn"
+						class:active={inputMode === "mic"}
+						disabled={isRunning}
+						onclick={() => (inputMode = "mic")}>MIC</button
+					>
+					<button
+						class="toggle-btn"
+						class:active={inputMode === "file"}
+						disabled={isRunning}
+						onclick={() => (inputMode = "file")}>FILE</button
+					>
 				</div>
-				{#if inputMode === 'file'}
+				{#if inputMode === "file"}
 					<label class="file-btn">
-						<span>{selectedFile ? selectedFile.name.slice(0, 12).toUpperCase() : 'CHOOSE'}</span>
-						<input type="file" accept="audio/*" onchange={onFileChange}
-							disabled={isRunning} class="file-hidden" />
+						<span
+							>{selectedFile
+								? selectedFile.name.slice(0, 12).toUpperCase()
+								: "CHOOSE"}</span
+						>
+						<input
+							type="file"
+							accept="audio/*"
+							onchange={onFileChange}
+							disabled={isRunning}
+							class="file-hidden"
+						/>
 					</label>
 				{/if}
 			</div>
@@ -872,8 +1125,15 @@
 				<div class="param">
 					<span class="param-label">VOL</span>
 					<div class="param-wheel">
-						<input type="range" class="wheel-slider" min="0" max="2" step="0.01"
-							bind:value={volume} oninput={onVolumeInput} />
+						<input
+							type="range"
+							class="wheel-slider"
+							min="0"
+							max="2"
+							step="0.01"
+							bind:value={volume}
+							oninput={onVolumeInput}
+						/>
 					</div>
 					<span class="param-readout">{volume.toFixed(2)}</span>
 				</div>
@@ -924,8 +1184,12 @@
 	</section>
 
 	<!-- ─── Mobile credit (very bottom) ─── -->
-	<a class="mobile-credit" href="https://sedum.studio" target="_blank"
-		rel="noopener noreferrer">designed by <span>sedum.studio</span></a>
+	<a
+		class="mobile-credit"
+		href="https://sedum.studio"
+		target="_blank"
+		rel="noopener noreferrer">designed by <span>sedum.studio</span></a
+	>
 </main>
 
 <style>
@@ -939,11 +1203,183 @@
 		padding: 0;
 		background: #f2ede4;
 		color: #2a2a32;
-		font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+		font-family: "JetBrains Mono", "SF Mono", "Cascadia Code", "Consolas",
+			monospace;
 		overflow: hidden;
 		-webkit-font-smoothing: antialiased;
 		min-height: 100vh;
 		min-height: -webkit-fill-available;
+	}
+
+	/* ── Landing overlay ─────────────────────────── */
+	.landing {
+		position: fixed;
+		inset: 0;
+		z-index: 100;
+		background: #f2ede4;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		opacity: 1;
+		transition: opacity 0.45s cubic-bezier(0.22, 0.68, 0.35, 1);
+	}
+
+	.landing.dismissing {
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	.landing-content {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0;
+		user-select: none;
+	}
+
+	.landing-brand {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		line-height: 1.05;
+		margin-bottom: 20px;
+	}
+
+	.landing-top {
+		font-size: 42px;
+		font-weight: 600;
+		letter-spacing: 18px;
+		color: rgba(42, 42, 50, 0.52);
+		margin-left: 18px; /* optical center for letter-spacing */
+	}
+
+	.landing-bottom {
+		font-size: 42px;
+		font-weight: 300;
+		letter-spacing: 18px;
+		color: rgba(42, 42, 50, 0.22);
+		margin-left: 18px;
+	}
+
+	.landing-tagline {
+		margin: 0 0 40px;
+		font-size: 11px;
+		font-weight: 400;
+		letter-spacing: 2.5px;
+		line-height: 1.7;
+		color: rgba(42, 42, 50, 0.3);
+		text-align: center;
+		text-transform: uppercase;
+	}
+
+	.landing-actions {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 18px;
+		animation: landingFadeUp 0.5s cubic-bezier(0.22, 0.68, 0.35, 1) both;
+	}
+
+	.landing-cta {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		height: 44px;
+		padding: 0 32px;
+		border: 1.5px solid rgba(42, 42, 50, 0.18);
+		background: transparent;
+		color: rgba(42, 42, 50, 0.55);
+		font-family: inherit;
+		font-size: 11px;
+		font-weight: 500;
+		letter-spacing: 3px;
+		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+
+	.landing-cta:hover {
+		border-color: rgba(42, 42, 50, 0.35);
+		background: rgba(42, 42, 50, 0.03);
+		color: rgba(42, 42, 50, 0.72);
+	}
+
+	.cta-icon {
+		width: 0;
+		height: 0;
+		border-style: solid;
+		border-width: 5px 0 5px 9px;
+		border-color: transparent transparent transparent currentColor;
+		flex-shrink: 0;
+		opacity: 0.7;
+	}
+
+	.cta-text {
+		margin-left: 2px;
+	}
+
+	.landing-alt {
+		border: none;
+		background: none;
+		padding: 6px 12px;
+		font-family: inherit;
+		font-size: 9px;
+		font-weight: 500;
+		letter-spacing: 2.5px;
+		color: rgba(42, 42, 50, 0.24);
+		cursor: pointer;
+		transition: color 0.15s;
+		text-transform: uppercase;
+	}
+
+	.landing-alt:hover {
+		color: rgba(42, 42, 50, 0.45);
+	}
+
+	/* Loading dots */
+	.landing-loading {
+		display: flex;
+		gap: 6px;
+		align-items: center;
+		height: 44px;
+	}
+
+	.loading-dot {
+		width: 3px;
+		height: 3px;
+		border-radius: 50%;
+		background: rgba(42, 42, 50, 0.25);
+		animation: loadingPulse 1.2s ease-in-out infinite;
+	}
+
+	.loading-dot:nth-child(2) {
+		animation-delay: 0.15s;
+	}
+	.loading-dot:nth-child(3) {
+		animation-delay: 0.3s;
+	}
+
+	@keyframes loadingPulse {
+		0%,
+		80%,
+		100% {
+			opacity: 0.2;
+			transform: scale(1);
+		}
+		40% {
+			opacity: 1;
+			transform: scale(1.3);
+		}
+	}
+
+	@keyframes landingFadeUp {
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 
 	/* ── Grid layout ─────────────────────────────── */
@@ -981,10 +1417,18 @@
 	}
 
 	/* ── Panels ──────────────────────────────────── */
-	.mel-cloud { grid-area: mel; }
-	.trajectory { grid-area: traj; }
-	.analysis { grid-area: radar; }
-	.controls-bar { grid-area: ctrl; }
+	.mel-cloud {
+		grid-area: mel;
+	}
+	.trajectory {
+		grid-area: traj;
+	}
+	.analysis {
+		grid-area: radar;
+	}
+	.controls-bar {
+		grid-area: ctrl;
+	}
 
 	.mel-cloud {
 		display: flex;
@@ -1148,11 +1592,11 @@
 		display: flex;
 		align-items: flex-end;
 		--control-height: 28px;
-		padding: 28px 28px 32px;
-		padding-bottom: max(32px, calc(16px + env(safe-area-inset-bottom)));
-		padding-left: max(28px, env(safe-area-inset-left));
-		padding-right: max(28px, env(safe-area-inset-right));
-		gap: 0;
+		padding: 32px 32px 36px;
+		padding-bottom: max(36px, calc(20px + env(safe-area-inset-bottom)));
+		padding-left: max(32px, env(safe-area-inset-left));
+		padding-right: max(32px, env(safe-area-inset-right));
+		gap: 0.5em;
 	}
 
 	/* ── Brand ────────────────────────────────────── */
@@ -1160,7 +1604,7 @@
 		display: flex;
 		align-items: flex-end;
 		gap: 14px;
-		padding-right: 22px;
+		padding-right: 28px;
 		padding-bottom: 15px;
 		flex-shrink: 0;
 	}
@@ -1169,7 +1613,7 @@
 		display: flex;
 		flex-direction: column;
 		line-height: 1.15;
-		margin-bottom:-4px;
+		margin-bottom: -4px;
 	}
 
 	.brand-top {
@@ -1189,8 +1633,8 @@
 	/* ── Separator ───────────────────────────────── */
 	.ctrl-sep {
 		width: 1px;
-		height: 40px;
-		background: rgba(42, 42, 50, 0.10);
+		height: 100%;
+		background: rgba(42, 42, 50, 0.1);
 		flex-shrink: 0;
 		align-self: flex-end;
 	}
@@ -1199,8 +1643,8 @@
 	.ctrl-section {
 		display: flex;
 		flex-direction: column;
-		gap: 6px;
-		padding: 0 18px;
+		gap: 8px;
+		padding: 0 24px;
 		min-width: 0;
 	}
 
@@ -1231,8 +1675,8 @@
 
 	/* ── Play button ─────────────────────────────── */
 	.ctrl-btn.play {
-		width: 30px;
-		height: 30px;
+		width: var(--control-height);
+		height: var(--control-height);
 		padding: 0;
 		border: 1.5px solid rgba(42, 42, 50, 0.18);
 		border-radius: 50%;
@@ -1271,7 +1715,6 @@
 		width: 8px;
 		height: 8px;
 		background: rgba(160, 50, 50, 0.5);
-		border-radius: 2px;
 		flex-shrink: 0;
 	}
 
@@ -1282,7 +1725,6 @@
 		box-sizing: border-box;
 		align-items: stretch;
 		border: 1px solid rgba(42, 42, 50, 0.12);
-		border-radius: 4px;
 		overflow: hidden;
 	}
 
@@ -1327,7 +1769,6 @@
 		box-sizing: border-box;
 		padding: 0 12px;
 		border: 1px dashed rgba(42, 42, 50, 0.18);
-		border-radius: 4px;
 		background: transparent;
 		color: rgba(42, 42, 50, 0.4);
 		font-family: inherit;
@@ -1378,14 +1819,14 @@
 		position: relative;
 		width: 120px;
 		min-width: 60px;
-		height: 24px;
+		height: var(--control-height);
 		display: flex;
 		align-items: center;
 		flex-shrink: 1;
 	}
 
 	.param-wheel::before {
-		content: '';
+		content: "";
 		position: absolute;
 		left: 0;
 		right: 0;
@@ -1404,7 +1845,7 @@
 	}
 
 	.param-wheel::after {
-		content: '';
+		content: "";
 		position: absolute;
 		left: 0;
 		right: 0;
@@ -1419,7 +1860,7 @@
 		-webkit-appearance: none;
 		appearance: none;
 		width: 100%;
-		height: 24px;
+		height: var(--control-height);
 		background: transparent;
 		border-radius: 0;
 		outline: none;
@@ -1429,7 +1870,7 @@
 	}
 
 	.wheel-slider::-webkit-slider-runnable-track {
-		height: 24px;
+		height: var(--control-height);
 		background: transparent;
 	}
 
@@ -1437,7 +1878,7 @@
 		-webkit-appearance: none;
 		width: 2px;
 		height: 20px;
-		margin-top: 2px;
+		margin-top: 4px;
 		border-radius: 1px;
 		background: rgba(42, 42, 50, 0.55);
 		border: none;
@@ -1450,7 +1891,7 @@
 	}
 
 	.wheel-slider::-moz-range-track {
-		height: 24px;
+		height: var(--control-height);
 		background: transparent;
 	}
 
@@ -1496,7 +1937,6 @@
 		box-sizing: border-box;
 		padding: 0 5px;
 		border: 1px solid rgba(42, 42, 50, 0.1);
-		border-radius: 3px;
 		background: transparent;
 		color: rgba(42, 42, 50, 0.55);
 		font-family: inherit;
@@ -1507,8 +1947,12 @@
 		transition: border-color 0.12s;
 	}
 
-	.filter-sel select:hover { border-color: rgba(42, 42, 50, 0.22); }
-	.filter-sel select:focus { border-color: rgba(42, 42, 50, 0.3); }
+	.filter-sel select:hover {
+		border-color: rgba(42, 42, 50, 0.22);
+	}
+	.filter-sel select:focus {
+		border-color: rgba(42, 42, 50, 0.3);
+	}
 
 	/* ── FPS ──────────────────────────────────────── */
 	.ctrl-fps {
@@ -1524,7 +1968,7 @@
 	.fps-number {
 		font-size: 14px;
 		font-weight: 300;
-		color: rgba(42, 42, 50, 0.30);
+		color: rgba(42, 42, 50, 0.3);
 		font-variant-numeric: tabular-nums;
 		line-height: 1;
 	}
@@ -1533,7 +1977,7 @@
 		font-size: 8px;
 		font-weight: 500;
 		letter-spacing: 2px;
-		color: rgba(42, 42, 50, 0.20);
+		color: rgba(42, 42, 50, 0.2);
 	}
 
 	/* ── Status badge ────────────────────────────── */
@@ -1547,9 +1991,10 @@
 		letter-spacing: 2px;
 		color: rgba(42, 42, 50, 0.35);
 		border: 1px solid rgba(42, 42, 50, 0.12);
-		border-radius: 3px;
 		background: transparent;
-		transition: color 0.2s, border-color 0.2s;
+		transition:
+			color 0.2s,
+			border-color 0.2s;
 		flex-shrink: 0;
 		font-variant-numeric: tabular-nums;
 	}
@@ -1561,8 +2006,8 @@
 
 	.design-credit {
 		position: absolute;
-		bottom: 29px;
-		left: 28px;
+		bottom: 34px;
+		left: 32px;
 		font-size: 9px;
 		font-weight: 600;
 		letter-spacing: 0.35px;
@@ -1585,28 +2030,94 @@
 	}
 
 	/* ── Desktop: card wrappers are transparent ─── */
-	.cards-viewport { display: contents; }
-	.cards-track { display: contents; }
-	.mobile-header { display: none; }
-	.card-indicator { display: none; }
-	.mobile-credit { display: none; }
+	.cards-viewport {
+		display: contents;
+	}
+	.cards-track {
+		display: contents;
+	}
+	.mobile-header {
+		display: none;
+	}
+	.card-indicator {
+		display: none;
+	}
+	.mobile-credit {
+		display: none;
+	}
 
 	/* ── Responsive (desktop) ────────────────────── */
 	@media (max-width: 1200px) {
-		.ctrl-section { padding: 0 12px; }
-		.ctrl-brand { padding-right: 14px; }
-		.param-wheel { width: 90px; }
-		.filter-group { gap: 6px; padding-left: 8px; margin-left: 4px; }
+		.ctrl-section {
+			padding: 0 16px;
+		}
+		.ctrl-brand {
+			padding-right: 18px;
+		}
+		.param-wheel {
+			width: 90px;
+		}
+		.filter-group {
+			gap: 6px;
+			padding-left: 8px;
+			margin-left: 4px;
+		}
+	}
+
+	@media (max-width: 1065px) and (min-width: 961px) {
+		.ctrl-fps {
+			display: none;
+		}
+		.ctrl-section {
+			padding: 0 14px;
+		}
+		.param-wheel {
+			width: 80px;
+		}
 	}
 
 	@media (max-width: 960px) and (min-width: 769px) {
-		.controls-bar { padding: 10px 16px 28px; }
-		.ctrl-section { padding: 0 8px; }
-		.param-wheel { width: 70px; }
-		.filter-group { display: none; }
-		.ctrl-brand { gap: 8px; }
-		.brand-top, .brand-bottom { font-size: 13px; letter-spacing: 4px; }
-		.design-credit { left: 16px; bottom: 8px; }
+		.controls-bar {
+			padding: 24px 20px 28px;
+			padding-bottom: max(28px, calc(12px + env(safe-area-inset-bottom)));
+			gap: 0.8em;
+		}
+		.ctrl-section {
+			padding: 0 10px;
+		}
+		.param-wheel {
+			width: 70px;
+		}
+		.filter-group {
+			display: none;
+		}
+		.ctrl-fps {
+			display: none;
+		}
+		.ctrl-brand {
+			gap: 10px;
+			padding-right: 14px;
+		}
+		.brand-top,
+		.brand-bottom {
+			font-size: 15px;
+			letter-spacing: 4px;
+		}
+		.design-credit {
+			font-size: 8px;
+			letter-spacing: 0.2px;
+			left: 20px;
+			bottom: 28px;
+		}
+	}
+
+	@media (max-width: 860px) and (min-width: 769px) {
+		.ctrl-section {
+			padding: 0 7px;
+		}
+		.ctrl-brand {
+			padding-right: 8px;
+		}
 	}
 
 	/* ═══════════════════════════════════════════════
@@ -1633,7 +2144,7 @@
 			background: #f2ede4;
 			flex-shrink: 0;
 			z-index: 10;
-			border-bottom: 1px solid rgba(42, 42, 50, 0.10);
+			border-bottom: 1px solid rgba(42, 42, 50, 0.1);
 			gap: 14px;
 		}
 
@@ -1725,7 +2236,7 @@
 			padding: 9px 18px;
 			background: #f2ede4;
 			flex-shrink: 0;
-			border-top: 1px solid rgba(42, 42, 50, 0.10);
+			border-top: 1px solid rgba(42, 42, 50, 0.1);
 		}
 
 		.card-label {
@@ -1754,7 +2265,7 @@
 
 		.card-dot.active {
 			width: 24px;
-			background: rgba(42, 42, 50, 0.40);
+			background: rgba(42, 42, 50, 0.4);
 		}
 
 		/* ── Panel labels ────────────────────── */
@@ -1789,14 +2300,22 @@
 			padding: 16px 18px 12px;
 			padding-bottom: calc(env(safe-area-inset-bottom));
 			flex-shrink: 0;
-			border-top: 1px solid rgba(42, 42, 50, 0.10);
+			border-top: 1px solid rgba(42, 42, 50, 0.1);
 		}
 
 		/* Hide desktop-only elements */
-		.ctrl-brand { display: none; }
-		.ctrl-sep { display: none; }
-		.filter-group { display: none; }
-		.ctrl-fps { display: none; }
+		.ctrl-brand {
+			display: none;
+		}
+		.ctrl-sep {
+			display: none;
+		}
+		.filter-group {
+			display: none;
+		}
+		.ctrl-fps {
+			display: none;
+		}
 
 		/* Section labels visible as row headers */
 		.section-label {
@@ -1907,13 +2426,34 @@
 		}
 
 		.mobile-credit:hover {
-			color: rgba(42, 42, 50, 0.40);
+			color: rgba(42, 42, 50, 0.4);
 		}
 
 		/* ── Mel panel mobile adjustments ────── */
 		.mel-2d {
 			height: 12%;
 			min-height: 24px;
+		}
+
+		/* ── Landing mobile ──────────────────── */
+		.landing-top,
+		.landing-bottom {
+			font-size: 32px;
+			letter-spacing: 14px;
+			margin-left: 14px;
+		}
+
+		.landing-tagline {
+			font-size: 10px;
+			letter-spacing: 2px;
+			margin-bottom: 36px;
+		}
+
+		.landing-cta {
+			height: 40px;
+			padding: 0 28px;
+			font-size: 10px;
+			letter-spacing: 2.5px;
 		}
 	}
 </style>
