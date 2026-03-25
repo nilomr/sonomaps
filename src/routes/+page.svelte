@@ -13,6 +13,7 @@
 	import { OscilloscopeRenderer } from "$lib/render/oscilloscope.js";
 	import { PitchGaugeRenderer } from "$lib/render/pitch-gauge.js";
 	import demoAudioUrl from "$lib/assets/jazz-guitar.mp3?url";
+	import socialPreviewImage from "$lib/assets/sonomaps-compressed.jpg";
 
 	// ── DOM refs ───────────────────────────────────────────
 	let melCanvas: HTMLCanvasElement;
@@ -930,12 +931,53 @@
 </script>
 
 <svelte:head>
-	<title>SonoMaps</title>
+	<title>SonoMaps — Real-time audio analysis &amp; visualization</title>
+	
+	<!-- SEO Meta Tags -->
+	<meta
+		name="description"
+		content="Real-time audio analysis and visualization. Explore sound through an interactive 3D trajectory, live spectrograms, and detailed audio metrics."
+	/>
+	<meta name="keywords" content="audio analysis, visualization, spectrogram, pitch detection, real-time, web audio" />
+	<meta name="author" content="sedum.studio" />
+	<meta name="robots" content="index, follow" />
+	<link rel="canonical" href="https://nilomr.github.io/sonomaps" />
+
+	<!-- Open Graph Meta Tags (Social Media) -->
+	<meta property="og:type" content="website" />
+	<meta
+		property="og:title"
+		content="SonoMaps — Real-time audio analysis &amp; visualization"
+	/>
+	<meta
+		property="og:description"
+		content="Interactive 3D audio visualization. Analyze sound in real-time with trajectory mapping, spectrograms, and detailed audio metrics."
+	/>
+	<meta property="og:image" content={socialPreviewImage} />
+	<meta property="og:url" content="https://nilomr.github.io/sonomaps" />
+	<meta property="og:site_name" content="SonoMaps" />
+
+	<!-- Twitter Card Meta Tags -->
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta
+		name="twitter:title"
+		content="SonoMaps — Real-time audio analysis &amp; visualization"
+	/>
+	<meta
+		name="twitter:description"
+		content="Interactive 3D audio visualization. Analyze sound in real-time with trajectory mapping, spectrograms, and detailed audio metrics."
+	/>
+	<meta name="twitter:image" content={socialPreviewImage} />
+	<meta name="twitter:site" content="@nilomr" />
+
+	<!-- Additional Meta Tags -->
 	<meta
 		name="viewport"
 		content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
 	/>
 	<meta name="theme-color" content="#f2ede4" />
+	
+	<!-- Preconnect for Performance -->
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
 	<link
 		rel="preconnect"
