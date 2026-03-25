@@ -12,11 +12,15 @@ const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 
 
 const ARC_START = Math.PI * 0.78;
 const ARC_END = Math.PI * 2.22;
-const LOG_MIN = Math.log2(500);    // 500 Hz
+const LOG_MIN = Math.log2(20);     // 20 Hz (practical minimum, represents ~0)
 const LOG_MAX = Math.log2(12000);  // 12 kHz
 const LOG_RANGE = LOG_MAX - LOG_MIN;
 
 const OCTAVE_LABELS = [
+	{ freq: 20, label: '20' },
+	{ freq: 50, label: '50' },
+	{ freq: 125, label: '125' },
+	{ freq: 250, label: '250' },
 	{ freq: 500, label: '500' },
 	{ freq: 1000, label: '1k' },
 	{ freq: 2000, label: '2k' },
@@ -100,7 +104,7 @@ export class PitchGaugeRenderer {
 	}
 
 	private freqToBin(freq: number): number {
-		const t = (Math.log2(Math.max(500, Math.min(12000, freq))) - LOG_MIN) / LOG_RANGE;
+		const t = (Math.log2(Math.max(20, Math.min(12000, freq))) - LOG_MIN) / LOG_RANGE;
 		return Math.round(t * (NUM_BINS - 1));
 	}
 
@@ -110,7 +114,7 @@ export class PitchGaugeRenderer {
 	}
 
 	private freqToAngle(freq: number): number {
-		const t = (Math.log2(Math.max(500, Math.min(12000, freq))) - LOG_MIN) / LOG_RANGE;
+		const t = (Math.log2(Math.max(20, Math.min(12000, freq))) - LOG_MIN) / LOG_RANGE;
 		return ARC_START + t * (ARC_END - ARC_START);
 	}
 
@@ -145,9 +149,10 @@ export class PitchGaugeRenderer {
 		}
 
 		// Semitone ticks (subtle)
-		for (let midi = 71; midi <= 119; midi++) {
+		for (let midi = 0; midi <= 119; midi++) {
 			if (midi % 12 === 0) continue;
 			const freq = 440 * Math.pow(2, (midi - 69) / 12);
+			if (freq < 20 || freq > 12000) continue;
 			const a = this.freqToAngle(freq);
 			ctx.strokeStyle = 'rgba(42, 42, 50, 0.04)';
 			ctx.lineWidth = 0.5;
