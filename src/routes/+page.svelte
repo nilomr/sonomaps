@@ -66,8 +66,12 @@
 	let touchDeltaX = $state(0);
 	let isSwiping = $state(false);
 	let touchStartTime = 0;
+	let showSwipeHint = $state(false);
+	let swipeHintTimeoutId = 0;
+	let swipeHintRepeatTimeoutId = 0;
+	let hasDiscoveredCardNavigation = $state(false);
 
-	const CARD_NAMES = ["ANALYSIS", "MEL SPECTROGRAM", "TRAJECTORY"];
+	const CARD_NAMES = ["TRAJECTORY", "ANALYSIS", "MEL SPECTROGRAM"];
 	const NUM_CARDS = 3;
 
 	// ── Fixed parameters ─────────────────────────────────
@@ -271,6 +275,45 @@
 		const t = Math.max(0, Math.min(1, tonality));
 		if (t > 0.99) return t.toFixed(4);
 		return t.toFixed(3);
+	}
+
+	function clearSwipeHintTimeout(): void {
+		if (swipeHintTimeoutId) {
+			window.clearTimeout(swipeHintTimeoutId);
+			swipeHintTimeoutId = 0;
+		}
+	}
+
+	function clearSwipeHintRepeatTimeout(): void {
+		if (swipeHintRepeatTimeoutId) {
+			window.clearTimeout(swipeHintRepeatTimeoutId);
+			swipeHintRepeatTimeoutId = 0;
+		}
+	}
+
+	function dismissSwipeHint(): void {
+		showSwipeHint = false;
+		clearSwipeHintTimeout();
+		clearSwipeHintRepeatTimeout();
+	}
+
+	function scheduleSwipeHint(): void {
+		if (!isMobile || hasDiscoveredCardNavigation || currentCard >= NUM_CARDS - 1) {
+			dismissSwipeHint();
+			return;
+		}
+
+		showSwipeHint = true;
+		clearSwipeHintTimeout();
+		clearSwipeHintRepeatTimeout();
+		swipeHintTimeoutId = window.setTimeout(() => {
+			showSwipeHint = false;
+			swipeHintTimeoutId = 0;
+			swipeHintRepeatTimeoutId = window.setTimeout(() => {
+				swipeHintRepeatTimeoutId = 0;
+				scheduleSwipeHint();
+			}, 7200);
+		}, 2400);
 	}
 
 	// ── High-frequency audio sampling (~250Hz) ───────────
@@ -571,11 +614,18 @@
 		// ── Mobile detection ──────────────────────────
 		const mql = window.matchMedia("(max-width: 768px)");
 		isMobile = mql.matches;
+		hasDiscoveredCardNavigation = false;
+		if (isMobile) scheduleSwipeHint();
 		const onMqlChange = (e: MediaQueryListEvent) => {
 			isMobile = e.matches;
 			if (!isMobile) {
 				currentCard = 0;
 				touchDeltaX = 0;
+				hasDiscoveredCardNavigation = false;
+				dismissSwipeHint();
+			} else {
+				hasDiscoveredCardNavigation = false;
+				scheduleSwipeHint();
 			}
 		};
 		mql.addEventListener("change", onMqlChange);
@@ -601,16 +651,16 @@
 			}
 
 			// Render only visible card on mobile for performance
-			// Card order on mobile: 0=Analysis, 1=Mel, 2=Trajectory
-			if (!isMobile || currentCard === 0) renderRadar();
-			if (!isMobile || currentCard === 1) melCloud?.render();
-			if (!isMobile || currentCard === 2) {
+			// Card order on mobile: 0=Trajectory, 1=Analysis, 2=Mel
+			if (!isMobile || currentCard === 1) renderRadar();
+			if (!isMobile || currentCard === 2) melCloud?.render();
+			if (!isMobile || currentCard === 0) {
 				pointCloud?.render();
 				if (pointCloud) trajMetrics = pointCloud.getMetrics();
 			}
 
 			// Oscilloscope + pitch gauge (Analysis card)
-			if (!isMobile || currentCard === 0) {
+			if (!isMobile || currentCard === 1) {
 				if (processing && audioSource) {
 					scope?.draw(audioSource.timeData);
 					pitchGauge?.draw(
@@ -678,6 +728,8 @@
 		return () => {
 			cancelAnimationFrame(animFrameId);
 			clearInterval(sampleIntervalId);
+			clearSwipeHintRepeatTimeout();
+			clearSwipeHintTimeout();
 			window.removeEventListener("resize", onResize);
 			mql.removeEventListener("change", onMqlChange);
 			cardsViewport?.removeEventListener("touchmove", onTouchMove);
@@ -803,6 +855,7 @@
 	// ── Mobile touch handlers ───────────────────────────
 	function onTouchStart(e: TouchEvent) {
 		if (!isMobile) return;
+		dismissSwipeHint();
 		touchStartX = e.touches[0].clientX;
 		touchStartY = e.touches[0].clientY;
 		touchStartTime = Date.now();
@@ -838,6 +891,7 @@
 	function onTouchEnd() {
 		if (!isMobile || !isSwiping) {
 			touchDeltaX = 0;
+			if (!hasDiscoveredCardNavigation) scheduleSwipeHint();
 			return;
 		}
 		const elapsed = Date.now() - touchStartTime;
@@ -846,9 +900,13 @@
 		const threshold = velocity > 0.4 ? 30 : window.innerWidth * 0.2;
 
 		if (touchDeltaX < -threshold && currentCard < NUM_CARDS - 1) {
+			hasDiscoveredCardNavigation = true;
 			currentCard++;
 		} else if (touchDeltaX > threshold && currentCard > 0) {
+			hasDiscoveredCardNavigation = true;
 			currentCard--;
+		} else if (!hasDiscoveredCardNavigation) {
+			scheduleSwipeHint();
 		}
 		touchDeltaX = 0;
 		isSwiping = false;
@@ -864,6 +922,8 @@
 	}
 
 	function goToCard(i: number) {
+		hasDiscoveredCardNavigation = true;
+		dismissSwipeHint();
 		currentCard = i;
 		triggerCardResize();
 	}
@@ -956,38 +1016,10 @@
 		<div
 			class="cards-track"
 			style={isMobile
-				? `transform:translateX(calc(${-currentCard} * (100vw - 28px) + ${touchDeltaX}px));${isSwiping ? "" : "transition:transform 0.35s cubic-bezier(0.22,0.68,0.35,1)"}`
+				? `transform:translateX(calc(${-currentCard} * 100vw + ${touchDeltaX}px));${isSwiping ? "" : "transition:transform 0.35s cubic-bezier(0.22,0.68,0.35,1)"}`
 				: ""}
 		>
-			<!-- ─── Analysis (card 0 on mobile) ─── -->
-			<section class="panel analysis">
-				<div class="analysis-radar">
-					<canvas bind:this={radarCanvas} class="fill-canvas"
-					></canvas>
-				</div>
-				<div class="analysis-pitch">
-					<canvas bind:this={pitchCanvas}></canvas>
-					<span class="panel-label sub">PEAK FREQ</span>
-				</div>
-				<div class="analysis-scope">
-					<canvas bind:this={scopeCanvas}></canvas>
-					<span class="panel-label sub">WAVEFORM</span>
-				</div>
-				<span class="panel-label">ANALYSIS</span>
-			</section>
-
-			<!-- ─── Mel cloud (card 1 on mobile) ─── -->
-			<section class="panel mel-cloud">
-				<div class="mel-3d">
-					<canvas bind:this={melCanvas}></canvas>
-				</div>
-				<div class="mel-2d">
-					<canvas bind:this={spectroCanvas}></canvas>
-				</div>
-				<span class="panel-label">MEL SPECTROGRAM</span>
-			</section>
-
-			<!-- ─── Trajectory (card 2 on mobile) ─── -->
+			<!-- ─── Trajectory (card 0 on mobile) ─── -->
 			<section class="panel trajectory">
 				<canvas bind:this={pointCanvas}></canvas>
 				<span class="panel-label">TRAJECTORY</span>
@@ -1029,7 +1061,45 @@
 					</div>
 				{/if}
 			</section>
+
+			<!-- ─── Analysis (card 1 on mobile) ─── -->
+			<section class="panel analysis">
+				<div class="analysis-radar">
+					<canvas bind:this={radarCanvas} class="fill-canvas"
+					></canvas>
+				</div>
+				<div class="analysis-pitch">
+					<canvas bind:this={pitchCanvas}></canvas>
+					<span class="panel-label sub">PEAK FREQ</span>
+				</div>
+				<div class="analysis-scope">
+					<canvas bind:this={scopeCanvas}></canvas>
+					<span class="panel-label sub">WAVEFORM</span>
+				</div>
+				<span class="panel-label">ANALYSIS</span>
+			</section>
+
+			<!-- ─── Mel cloud (card 2 on mobile) ─── -->
+			<section class="panel mel-cloud">
+				<div class="mel-3d">
+					<canvas bind:this={melCanvas}></canvas>
+				</div>
+				<div class="mel-2d">
+					<canvas bind:this={spectroCanvas}></canvas>
+				</div>
+				<span class="panel-label">MEL SPECTROGRAM</span>
+			</section>
 		</div>
+
+		{#if isMobile && showSwipeHint}
+			<div class="swipe-hint" aria-hidden="true">
+				<span class="swipe-hint-text">SWIPE</span>
+				<span class="swipe-hint-arrows">
+					<span class="swipe-hint-arrow"></span>
+					<span class="swipe-hint-arrow"></span>
+				</span>
+			</div>
+		{/if}
 	</div>
 
 	<!-- ─── Card indicator (visible on mobile) ─── -->
@@ -1270,6 +1340,7 @@
 		color: rgba(42, 42, 50, 0.3);
 		text-align: center;
 		text-transform: uppercase;
+		max-width: 40ch;
 	}
 
 	.landing-actions {
@@ -2199,7 +2270,7 @@
 			color: rgba(42, 42, 50, 0.18);
 		}
 
-		/* ── Cards viewport (peek effect) ────── */
+		/* ── Cards viewport ──────────────────── */
 		.cards-viewport {
 			display: block;
 			flex: 1;
@@ -2210,23 +2281,69 @@
 
 		.cards-track {
 			display: flex;
-			margin-left: 14px;
 			height: 100%;
 			will-change: transform;
 		}
 
 		.cards-track > .panel {
-			width: calc(100vw - 28px);
+			width: 100vw;
 			flex-shrink: 0;
 			height: 100%;
 			box-sizing: border-box;
-			border-right: 1px solid rgba(42, 42, 50, 0.12);
 			touch-action: pan-y pinch-zoom;
 		}
 
 		.cards-track > .panel:first-child {
-			border-left: 1px solid rgba(42, 42, 50, 0.12);
+			border-left: none;
 		}
+
+		.swipe-hint {
+			position: absolute;
+			top: 18px;
+			right: 0;
+			transform: none;
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 10px 10px 10px 24px;
+			background: linear-gradient(
+				90deg,
+				rgba(242, 237, 228, 0) 0%,
+				rgba(242, 237, 228, 0.68) 34%,
+				rgba(242, 237, 228, 0.94) 64%,
+				#f2ede4 100%
+			);
+			pointer-events: none;
+			z-index: 3;
+			animation: swipeCue 1.45s ease-in-out infinite;
+		}
+
+		.swipe-hint-text {
+			font-size: 7px;
+			font-weight: 600;
+			letter-spacing: 2.4px;
+			color: rgba(42, 42, 50, 0.28);
+		}
+
+		.swipe-hint-arrows {
+			display: flex;
+			align-items: center;
+			gap: 1px;
+		}
+
+		.swipe-hint-arrow {
+			display: block;
+			width: 7px;
+			height: 7px;
+			border-left: 0.75px solid rgba(42, 42, 50, 0.26);
+			border-bottom: 0.75px solid rgba(42, 42, 50, 0.26);
+			transform: rotate(45deg);
+		}
+
+		.swipe-hint-arrow:last-child {
+			opacity: 0.75;
+		}
+
 
 		/* ── Card indicator ───────────────────── */
 		.card-indicator {
@@ -2266,6 +2383,19 @@
 		.card-dot.active {
 			width: 24px;
 			background: rgba(42, 42, 50, 0.4);
+		}
+
+		@keyframes swipeCue {
+			0%,
+			100% {
+				transform: translateX(0);
+				opacity: 0.35;
+			}
+
+			50% {
+				transform: translateX(-6px);
+				opacity: 1;
+			}
 		}
 
 		/* ── Panel labels ────────────────────── */
