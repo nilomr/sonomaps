@@ -1007,8 +1007,8 @@
 				</div>
 
 				<p class="landing-tagline">
-					Song diversity of great tits<br />
-					<span class="wytham-latin">Parus major</span><br />
+					Song diversity of great tits
+					<span class="wytham-latin">Parus major</span>
 					in Wytham Woods
 				</p>
 
@@ -2650,7 +2650,7 @@
 			letter-spacing: 1.8px;
 			line-height: 1.8;
 			margin-bottom: 24px;
-			max-width: 30ch;
+			max-width: 40ch;
 		}
 
 		.landing-cta {
