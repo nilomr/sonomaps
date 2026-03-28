@@ -48,6 +48,15 @@
 	let showLanding = $state(true);
 	let demoReady = $state(false);
 	let landingDismissing = $state(false);
+	let landingRevealed = $state(false);
+
+	// Preload the bird illustration so it's ready before reveal
+	if (typeof window !== "undefined") {
+		const img = new Image();
+		img.src = birdHawthorn;
+		const reveal = () => { landingRevealed = true; };
+		img.complete ? reveal() : img.onload = img.onerror = reveal;
+	}
 
 	// ── UI state ──────────────────────────────────────────
 	let isRunning = $state(false);
@@ -994,32 +1003,32 @@
 	<!-- ─── Landing overlay ─── -->
 	{#if showLanding}
 		<div class="landing" class:dismissing={landingDismissing}>
-			<div class="landing-content wytham-landing">
+			<div class="landing-content wytham-landing" class:revealed={landingRevealed}>
 
 				<!-- Hawthorn bird illustration -->
-				<div class="wytham-illustration" aria-label="Great tit illustration">
+				<div class="wytham-illustration stagger" aria-label="Great tit illustration">
 					<img src={birdHawthorn} alt="Great tit bird illustration" />
 				</div>
 
-				<div class="landing-brand">
+				<div class="landing-brand stagger">
 					<span class="landing-top">WYTHAM</span>
 					<span class="landing-bottom">TITS</span>
 				</div>
 
-				<p class="landing-tagline">
+				<p class="landing-tagline stagger">
 					Song diversity of great tits
 					<span class="wytham-latin">Parus major</span>
 					in Wytham Woods
 				</p>
 
-				<p class="wytham-description">
+				<p class="wytham-description stagger">
 					A representation of the sound space occupied
 					by great tit songs recorded across
 					a wild population in Wytham Woods, Oxford.
 				</p>
 
 				{#if demoReady}
-					<div class="landing-actions">
+					<div class="landing-actions stagger">
 						{#if selectedFile}
 							<button
 								class="landing-cta"
@@ -1031,14 +1040,14 @@
 						{/if}
 					</div>
 				{:else}
-					<div class="landing-loading">
+					<div class="landing-loading stagger">
 						<span class="loading-dot"></span>
 						<span class="loading-dot"></span>
 						<span class="loading-dot"></span>
 					</div>
 				{/if}
 
-				<div class="wytham-links">
+				<div class="wytham-links stagger">
 					<a
 						href="https://www.cell.com/current-biology/fulltext/S0960-9822(25)00150-2"
 						class="wytham-link"
@@ -1384,6 +1393,34 @@
 		user-select: none;
 	}
 
+	/* ── Staggered reveal ─────────────────────── */
+	.landing-content .stagger {
+		opacity: 0;
+		transform: translateY(12px);
+	}
+
+	.landing-content.revealed .stagger {
+		animation: landingReveal 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+	}
+
+	.landing-content.revealed .stagger:nth-child(1) { animation-delay: 0.04s; }
+	.landing-content.revealed .stagger:nth-child(2) { animation-delay: 0.14s; }
+	.landing-content.revealed .stagger:nth-child(3) { animation-delay: 0.24s; }
+	.landing-content.revealed .stagger:nth-child(4) { animation-delay: 0.34s; }
+	.landing-content.revealed .stagger:nth-child(5) { animation-delay: 0.46s; }
+	.landing-content.revealed .stagger:nth-child(6) { animation-delay: 0.58s; }
+
+	@keyframes landingReveal {
+		from {
+			opacity: 0;
+			transform: translateY(12px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
 	.landing-brand {
 		display: flex;
 		flex-direction: column;
@@ -1425,7 +1462,6 @@
 		flex-direction: column;
 		align-items: center;
 		gap: 18px;
-		animation: landingFadeUp 0.5s cubic-bezier(0.22, 0.68, 0.35, 1) both;
 	}
 
 	.landing-cta {
@@ -1498,17 +1534,6 @@
 		40% {
 			opacity: 1;
 			transform: scale(1.3);
-		}
-	}
-
-	@keyframes landingFadeUp {
-		from {
-			opacity: 0;
-			transform: translateY(8px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
 		}
 	}
 
