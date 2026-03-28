@@ -1013,8 +1013,8 @@
 				</p>
 
 				<p class="wytham-description">
-					A representation of the sound space occupied<br class="hide-mobile" />
-					by great tit songs recorded across<br class="hide-mobile" />
+					A representation of the sound space occupied
+					by great tit songs recorded across
 					a wild population in Wytham Woods, Oxford.
 				</p>
 
@@ -1040,14 +1040,6 @@
 
 				<div class="wytham-links">
 					<a
-						href="https://nilomr.github.io/sonomaps/"
-						class="wytham-link"
-						target="_blank"
-						rel="noopener noreferrer"
-						>SONOMAPS</a
-					>
-					<span class="wytham-link-sep"></span>
-					<a
 						href="https://www.cell.com/current-biology/fulltext/S0960-9822(25)00150-2"
 						class="wytham-link"
 						target="_blank"
@@ -1062,13 +1054,12 @@
 						rel="noopener noreferrer"
 						>PROJECT</a
 					>
-					<span class="wytham-link-sep"></span>
 					<a
 						href="https://www.sedum.studio/"
 						class="wytham-link"
 						target="_blank"
 						rel="noopener noreferrer"
-						>SEDUM</a
+						>SEDUM.STUDIO</a
 					>
 				</div>
 			</div>
@@ -1398,7 +1389,7 @@
 		flex-direction: column;
 		align-items: center;
 		line-height: 1.05;
-		margin-bottom: 20px;
+		margin-bottom: 22px;
 	}
 
 	.landing-top {
@@ -1418,7 +1409,7 @@
 	}
 
 	.landing-tagline {
-		margin: 0 0 40px;
+		margin: 0 0 32px;
 		font-size: 11px;
 		font-weight: 400;
 		letter-spacing: 2.5px;
@@ -2634,68 +2625,94 @@
 		}
 
 		/* ── Landing mobile ──────────────────── */
+		.landing {
+			padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+		}
+
+		.wytham-landing {
+			max-width: 320px;
+			padding: 0 28px;
+		}
+
+		.landing-brand {
+			margin-bottom: 18px;
+		}
+
 		.landing-top,
 		.landing-bottom {
-			font-size: 32px;
-			letter-spacing: 14px;
-			margin-left: 14px;
+			font-size: 28px;
+			letter-spacing: 12px;
+			margin-left: 12px;
 		}
 
 		.landing-tagline {
-			font-size: 10px;
-			letter-spacing: 2px;
-			margin-bottom: 36px;
+			font-size: 9.5px;
+			letter-spacing: 1.8px;
+			line-height: 1.8;
+			margin-bottom: 24px;
+			max-width: 30ch;
 		}
 
 		.landing-cta {
-			height: 40px;
-			padding: 0 28px;
+			height: 42px;
+			padding: 0 30px;
 			font-size: 10px;
 			letter-spacing: 2.5px;
 		}
 
+		.wytham-illustration {
+			margin-bottom: 24px;
+		}
+
 		.wytham-illustration img {
-			width: 120px;
-			height: 120px;
+			width: 100px;
+			height: 100px;
 			object-fit: contain;
 		}
 
 		.wytham-description {
 			font-size: 9px;
+			font-weight: 400;
 			letter-spacing: 1.5px;
-			line-height: 1.8;
-			margin-bottom: 28px;
-		}
-
-		.hide-mobile {
-			display: none;
+			line-height: 2;
+			margin-bottom: 24px;
+			max-width: 28ch;
 		}
 
 		.wytham-links {
-			margin-top: 28px;
+			margin-top: 24px;
+			flex-wrap: wrap;
+			gap: 4px 0;
+			max-width: 260px;
 		}
 
 		.wytham-link {
 			font-size: 8px;
 			letter-spacing: 2px;
+			padding: 4px 10px;
+		}
+
+		.wytham-link-sep {
+			height: 8px;
 		}
 	}
 
 	/* ── Wytham Tits landing ────────────────────── */
 	.wytham-landing {
 		max-width: 440px;
-		padding: 0 24px;
+		padding: 0 32px;
 	}
 
 	.wytham-illustration {
-		margin-bottom: 28px;
+		margin-bottom: 32px;
 	}
 
 	.wytham-illustration svg,
 	.wytham-illustration img {
-		width: 150px;
-		height: 150px;
+		width: 140px;
+		height: 140px;
 		object-fit: contain;
+		opacity: 0.85;
 	}
 
 	.wytham-latin {
@@ -2705,7 +2722,7 @@
 	}
 
 	.wytham-description {
-		margin: 0 0 36px;
+		margin: 0 0 30px;
 		font-size: 10px;
 		font-weight: 400;
 		letter-spacing: 2px;
@@ -2713,6 +2730,7 @@
 		color: rgba(42, 42, 50, 0.22);
 		text-align: center;
 		text-transform: uppercase;
+		max-width: 34ch;
 	}
 
 	.wytham-links {
@@ -2720,7 +2738,7 @@
 		align-items: center;
 		justify-content: center;
 		gap: 0;
-		margin-top: 36px;
+		margin-top: 40px;
 	}
 
 	.wytham-link {
